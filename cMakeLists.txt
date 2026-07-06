@@ -33,7 +33,9 @@ FetchContent_MakeAvailable(benchmark)
 # --- Core library ---
 add_library(orderbook_lib
   src/order.cpp
+  src/book.cpp
 )
+
 target_include_directories(orderbook_lib PUBLIC include)
 
 # --- Tests ---

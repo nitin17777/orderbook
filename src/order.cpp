@@ -1,7 +1,6 @@
 #include "orderbook/order.hpp"
+#include "orderbook/fill.hpp"
 
-namespace orderbook {
-
-int placeholder() { return 42; }
-
-}
+// Translation unit exists to anchor the library target in CMake.
+// Core types are header-only structs — no separate compilation needed yet.
+// This file will grow as we add logic.
