@@ -164,3 +164,94 @@ TEST_CASE("Cancel already filled order is silent no-op", "[cancel]") {
     bool cancelled = book.cancel(1); // order 1 already gone
     REQUIRE(cancelled == false);
 }
+
+
+
+
+#include "orderbook/fast_book.hpp"
+
+// ── FastOrderBook correctness — same cases as OrderBook ──────────────────────
+// Both implementations must produce identical results.
+// If these pass, the optimization didn't break correctness.
+
+static Order make_limit_f(OrderId id, Side side, Price price, Quantity qty,
+                           Timestamp ts = 0) {
+    Order o{};
+    o.id = id; o.side = side; o.type = OrderType::Limit;
+    o.status = OrderStatus::Accepted;
+    o.price = price; o.quantity = qty; o.filled = 0; o.timestamp = ts;
+    return o;
+}
+
+static Order make_market_f(OrderId id, Side side, Quantity qty) {
+    Order o{};
+    o.id = id; o.side = side; o.type = OrderType::Market;
+    o.status = OrderStatus::Accepted;
+    o.price = 0; o.quantity = qty; o.filled = 0; o.timestamp = 0;
+    return o;
+}
+
+TEST_CASE("Fast: limit buy rests in book", "[fast]") {
+    FastOrderBook book;
+    auto fills = book.add(make_limit_f(1, Side::Buy, 100, 10));
+    REQUIRE(fills.empty());
+    REQUIRE(book.best_bid() == 100);
+}
+
+TEST_CASE("Fast: exact match", "[fast]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Sell, 100, 10));
+    auto fills = book.add(make_limit_f(2, Side::Buy, 100, 10));
+    REQUIRE(fills.size() == 1);
+    REQUIRE(fills[0].price    == 100);
+    REQUIRE(fills[0].quantity == 10);
+    REQUIRE(book.order_count() == 0);
+}
+
+TEST_CASE("Fast: sweep multiple levels", "[fast]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Sell, 100, 5));
+    book.add(make_limit_f(2, Side::Sell, 101, 5));
+    book.add(make_limit_f(3, Side::Sell, 102, 5));
+    auto fills = book.add(make_limit_f(4, Side::Buy, 105, 15));
+    REQUIRE(fills.size() == 3);
+    REQUIRE(book.order_count() == 0);
+}
+
+TEST_CASE("Fast: FIFO priority", "[fast]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Sell, 100, 5, 1000));
+    book.add(make_limit_f(2, Side::Sell, 100, 5, 2000));
+    auto fills = book.add(make_limit_f(3, Side::Buy, 100, 5));
+    REQUIRE(fills[0].maker_id == 1);
+}
+
+TEST_CASE("Fast: market order against empty book", "[fast]") {
+    FastOrderBook book;
+    auto fills = book.add(make_market_f(1, Side::Buy, 10));
+    REQUIRE(fills.empty());
+    REQUIRE(book.order_count() == 0);
+}
+
+TEST_CASE("Fast: cancel removes order", "[fast]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Buy, 100, 10));
+    REQUIRE(book.cancel(1) == true);
+    REQUIRE(book.order_count() == 0);
+}
+
+TEST_CASE("Fast: cancel unknown id is no-op", "[fast]") {
+    FastOrderBook book;
+    REQUIRE(book.cancel(999) == false);
+}
+
+TEST_CASE("Fast: lazy deletion — cancelled order skipped during match", "[fast]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Sell, 100, 10));
+    book.add(make_limit_f(2, Side::Sell, 100, 10));
+    book.cancel(1); // cancel first maker — should be skipped, order 2 fills
+
+    auto fills = book.add(make_limit_f(3, Side::Buy, 100, 10));
+    REQUIRE(fills.size() == 1);
+    REQUIRE(fills[0].maker_id == 2); // order 1 was skipped
+}
