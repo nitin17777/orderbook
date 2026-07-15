@@ -52,3 +52,9 @@ add_executable(orderbook_bench
   benchmarks/bench_order.cpp
 )
 target_link_libraries(orderbook_bench PRIVATE orderbook_lib benchmark::benchmark)
+
+# --- CLI ---
+add_executable(orderbook_cli
+  src/main.cpp
+)
+target_link_libraries(orderbook_cli PRIVATE orderbook_lib)
