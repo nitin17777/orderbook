@@ -35,6 +35,7 @@ add_library(orderbook_lib
   src/order.cpp
   src/book.cpp
   src/fast_book.cpp
+  src/engine.cpp
 )
 
 target_include_directories(orderbook_lib PUBLIC include)
@@ -48,5 +49,6 @@ target_link_libraries(orderbook_tests PRIVATE orderbook_lib Catch2::Catch2WithMa
 # --- Benchmarks ---
 add_executable(orderbook_bench
   benchmarks/bench_order.cpp
+  tests/test_engine.cpp
 )
 target_link_libraries(orderbook_bench PRIVATE orderbook_lib benchmark::benchmark)

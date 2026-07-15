@@ -27,7 +27,8 @@
 
 ### What improved
 **Cancel is 2.1–2.8x faster** — the primary goal of the FastOrderBook design.
-Naive cancel scans a deque linearly to find the order by id. FastOrderBook marks
+Naive cancel 
+scans a deque linearly to find the order by id. FastOrderBook marks
 the order cancelled in the pool (O(1) hash lookup) and skips it lazily during
 matching. No scan needed.
 
