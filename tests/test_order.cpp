@@ -255,3 +255,62 @@ TEST_CASE("Fast: lazy deletion — cancelled order skipped during match", "[fast
     REQUIRE(fills.size() == 1);
     REQUIRE(fills[0].maker_id == 2); // order 1 was skipped
 }
+
+// ── Regression tests for cancel best-price tracking ──────────────────────────
+
+TEST_CASE("Fast: best_bid is nullopt after sole bid is cancelled", "[fast][regression]") {
+    // Bug: pool_.erase() invalidated `o`, then `o->side` was UB.
+    // Also: deque still held the stale id, so best_bid_price_ was never
+    // decremented — best_bid() returned 100 instead of nullopt.
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Buy, 100, 10));
+    book.cancel(1);
+
+    REQUIRE_FALSE(book.best_bid().has_value()); // must be empty, not 100
+    REQUIRE(book.order_count() == 0);
+}
+
+TEST_CASE("Fast: best_ask is nullopt after sole ask is cancelled", "[fast][regression]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Sell, 100, 10));
+    book.cancel(1);
+
+    REQUIRE_FALSE(book.best_ask().has_value());
+    REQUIRE(book.order_count() == 0);
+}
+
+TEST_CASE("Fast: best_bid stays correct after one of two bids at same level is cancelled", "[fast][regression]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Buy, 100, 10));
+    book.add(make_limit_f(2, Side::Buy, 100, 5));
+    book.cancel(1);
+
+    // Level 100 still has order 2 — best_bid must remain 100
+    REQUIRE(book.best_bid() == 100);
+    REQUIRE(book.order_count() == 1);
+}
+
+TEST_CASE("Fast: best_bid falls to lower level after top level is fully cancelled", "[fast][regression]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Buy, 105, 10)); // top
+    book.add(make_limit_f(2, Side::Buy, 100, 10)); // lower
+    book.cancel(1);
+
+    REQUIRE(book.best_bid() == 100); // must drop to 100, not stay at 105
+    REQUIRE(book.order_count() == 1);
+}
+
+TEST_CASE("Fast: new order matches correct maker after cancel-then-insert", "[fast][regression]") {
+    // After cancelling the sole order at the best level, a new incoming
+    // order must match at the next real level, not at the stale best.
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Sell, 100, 10)); // best ask = 100
+    book.add(make_limit_f(2, Side::Sell, 101, 10)); // ask = 101
+    book.cancel(1);                                  // cancel best ask
+
+    // Now best ask should be 101; an aggressive buy should fill there
+    auto fills = book.add(make_limit_f(3, Side::Buy, 105, 10));
+    REQUIRE(fills.size() == 1);
+    REQUIRE(fills[0].price     == 101); // fill at 101, not the stale 100
+    REQUIRE(fills[0].maker_id  == 2);
+}

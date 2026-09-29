@@ -28,16 +28,36 @@ void FastOrderBook::rest(Order order) {
     }
 }
 
-// Walk down from best_bid_price_ until we find a non-empty level
+// Walk down from best_bid_price_ until we find a level with at least one
+// live (non-cancelled, non-filled) order. During lazy deletion the deque
+// still holds stale IDs, so we must peek into the pool to confirm.
 void FastOrderBook::update_best_bid_after_removal() {
-    while (best_bid_price_ >= MIN_PRICE && bids_.empty(best_bid_price_))
+    while (best_bid_price_ >= MIN_PRICE) {
+        // Drain any stale (lazily-cancelled) ids at this level
+        while (!bids_.empty(best_bid_price_)) {
+            OrderId front_id = bids_.front(best_bid_price_);
+            const Order* o   = pool_.get(front_id);
+            if (o && !o->is_terminal()) break; // found a real order
+            bids_.pop_front(best_bid_price_);   // stale — remove eagerly
+        }
+        if (!bids_.empty(best_bid_price_)) break; // level has live orders
         --best_bid_price_;
+    }
 }
 
-// Walk up from best_ask_price_ until we find a non-empty level
+// Walk up from best_ask_price_ until we find a level with at least one
+// live order (same logic as above).
 void FastOrderBook::update_best_ask_after_removal() {
-    while (best_ask_price_ <= MAX_PRICE && asks_.empty(best_ask_price_))
+    while (best_ask_price_ <= MAX_PRICE) {
+        while (!asks_.empty(best_ask_price_)) {
+            OrderId front_id = asks_.front(best_ask_price_);
+            const Order* o   = pool_.get(front_id);
+            if (o && !o->is_terminal()) break;
+            asks_.pop_front(best_ask_price_);
+        }
+        if (!asks_.empty(best_ask_price_)) break;
         ++best_ask_price_;
+    }
 }
 
 std::vector<Fill> FastOrderBook::match(Order& incoming) {
@@ -159,13 +179,21 @@ bool FastOrderBook::cancel(OrderId id) {
     Order* o = pool_.get(id);
     if (!o || o->is_terminal()) return false;
 
-    // Lazy deletion — mark cancelled in pool.
-    // The queue entry is cleaned up next time matching walks past it.
-    o->status = OrderStatus::Cancelled;
-    pool_.erase(id);
+    // Save side before erasing — pool_.erase() invalidates the pointer.
+    const Side side = o->side;
 
-    // Update best price tracking if needed
-    if (o->side == Side::Buy)
+    // Lazy deletion — mark cancelled in pool.
+    // The queue entry is skipped next time matching walks past it;
+    // update_best_*_after_removal() will also drain it if it was at the
+    // best-price level.
+    o->status = OrderStatus::Cancelled;
+    pool_.erase(id); // o is dangling after this line — do not use
+
+    // Update best price tracking if needed.
+    // update_best_*_after_removal() now peeks into the pool to skip any
+    // stale queue entries, so it correctly finds the true best level even
+    // when lazy-deleted IDs are still sitting in the deques.
+    if (side == Side::Buy)
         update_best_bid_after_removal();
     else
         update_best_ask_after_removal();

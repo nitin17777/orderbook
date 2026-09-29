@@ -149,6 +149,10 @@ int main(int argc, char* argv[]) {
                 std::cout << "  usage: add buy|sell <price> <qty>\n";
                 continue;
             }
+        if (side_str != "buy" && side_str != "sell") {
+                std::cout << "  unknown side '" << side_str << "' — use buy or sell\n";
+                continue;
+            }
             Side side = (side_str == "buy") ? Side::Buy : Side::Sell;
             Order o = make_limit(side, price, qty);
             OrderId assigned_id = o.id;
@@ -170,6 +174,10 @@ int main(int argc, char* argv[]) {
             Quantity qty;
             if (!(ss >> side_str >> qty)) {
                 std::cout << "  usage: mkt buy|sell <qty>\n";
+                continue;
+            }
+            if (side_str != "buy" && side_str != "sell") {
+                std::cout << "  unknown side '" << side_str << "' — use buy or sell\n";
                 continue;
             }
             Side side = (side_str == "buy") ? Side::Buy : Side::Sell;

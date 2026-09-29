@@ -1,7 +1,7 @@
 # Order Book Engine
 
 A price-time priority matching engine written in C++20.
-Built for learning — every design decision is deliberate and documented.
+Built for learning-every design decision is deliberate and documented.
 
 ---
 
