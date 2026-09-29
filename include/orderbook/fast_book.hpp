@@ -67,6 +67,10 @@ public:
         return levels_[index(price)].empty();
     }
 
+    const std::deque<OrderId>& queue(Price price) const {
+        return levels_[index(price)];
+    }
+
     // Clear all levels — each deque.clear() is O(n) elements,
     // but the deque objects themselves stay allocated in the vector.
     // This is the cheap reset — no heap alloc/free of the 10k slots.
@@ -95,6 +99,10 @@ public:
 
     const Order* find(OrderId id) const { return pool_.get(id); }
     std::size_t  order_count()    const { return pool_.size(); }
+
+    const PriceLevelArray& bids() const { return bids_; }
+    const PriceLevelArray& asks() const { return asks_; }
+    const OrderPool&       pool() const { return pool_; }
 
     // Reset all state. The 10k deque slots stay allocated — only contents
     // are cleared. Construction cost is paid once; reset is cheap per iter.

@@ -12,6 +12,7 @@ struct Fill {
     OrderId  maker_id;  // resting order that was already in the book
     Price    price;     // always the maker's price — exchange convention
     Quantity quantity;  // how much was exchanged
+    bool operator==(const Fill& other) const = default;
 };
 
 } // namespace orderbook

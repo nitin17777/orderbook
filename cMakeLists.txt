@@ -30,6 +30,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(benchmark)
 
+option(ENABLE_ASAN "Enable Address and UB sanitizers" OFF)
+if(ENABLE_ASAN)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
 # --- Core library ---
 add_library(orderbook_lib
   src/order.cpp
@@ -44,8 +50,19 @@ target_include_directories(orderbook_lib PUBLIC include)
 add_executable(orderbook_tests
   tests/test_order.cpp
   tests/test_engine.cpp
+  tests/differential/test_snapshot.cpp
+  tests/differential/test_differential.cpp
 )
+target_include_directories(orderbook_tests PRIVATE tests/differential)
 target_link_libraries(orderbook_tests PRIVATE orderbook_lib Catch2::Catch2WithMain)
+
+# --- Differential Fuzzer CLI ---
+add_executable(orderbook_fuzz
+  tests/differential/fuzz_main.cpp
+  tests/differential/test_snapshot.cpp
+)
+target_include_directories(orderbook_fuzz PRIVATE tests/differential)
+target_link_libraries(orderbook_fuzz PRIVATE orderbook_lib)
 
 # --- Benchmarks ---
 add_executable(orderbook_bench
