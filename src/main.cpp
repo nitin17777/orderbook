@@ -135,9 +135,9 @@ int main(int argc, char* argv[]) {
                 std::cout << "  usage: cancel <id>\n";
                 continue;
             }
-            bool ok = engine.cancel(id);
-            if (ok) std::cout << "  [ORDER " << id << "] cancelled\n";
-            else    std::cout << "  [ORDER " << id << "] not found\n";
+            auto res = engine.cancel(id);
+            if (res.accepted) std::cout << "  [ORDER " << id << "] cancelled\n";
+            else              std::cout << "  [ORDER " << id << "] rejected: " << to_string(res.reason) << "\n";
             continue;
         }
 
@@ -149,22 +149,27 @@ int main(int argc, char* argv[]) {
                 std::cout << "  usage: add buy|sell <price> <qty>\n";
                 continue;
             }
-        if (side_str != "buy" && side_str != "sell") {
+            if (side_str != "buy" && side_str != "sell") {
                 std::cout << "  unknown side '" << side_str << "' — use buy or sell\n";
                 continue;
             }
             Side side = (side_str == "buy") ? Side::Buy : Side::Sell;
             Order o = make_limit(side, price, qty);
             OrderId assigned_id = o.id;
-            auto fills = engine.add(o);
+            auto res = engine.add(o);
+
+            if (!res.accepted) {
+                std::cout << "  [ORDER " << assigned_id << "] REJECTED: " << to_string(res.reason) << "\n";
+                continue;
+            }
 
             std::cout << "  [ORDER " << assigned_id << "] "
                       << side_str << " LIMIT " << qty
                       << "@" << price;
-            if (fills.empty()) std::cout << " resting\n";
+            if (res.fills.empty()) std::cout << " resting\n";
             else {
                 std::cout << "\n";
-                print_fills(fills);
+                print_fills(res.fills);
             }
             continue;
         }
@@ -183,14 +188,19 @@ int main(int argc, char* argv[]) {
             Side side = (side_str == "buy") ? Side::Buy : Side::Sell;
             Order o = make_market(side, qty);
             OrderId assigned_id = o.id;
-            auto fills = engine.add(o);
+            auto res = engine.add(o);
+
+            if (!res.accepted) {
+                std::cout << "  [ORDER " << assigned_id << "] REJECTED: " << to_string(res.reason) << "\n";
+                continue;
+            }
 
             std::cout << "  [ORDER " << assigned_id << "] "
                       << side_str << " MARKET " << qty;
-            if (fills.empty()) std::cout << " — no liquidity\n";
+            if (res.fills.empty()) std::cout << " — no liquidity\n";
             else {
                 std::cout << "\n";
-                print_fills(fills);
+                print_fills(res.fills);
             }
             continue;
         }

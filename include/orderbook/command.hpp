@@ -15,9 +15,11 @@ enum class CommandType : uint8_t {
 struct Command {
     CommandType type;
     union {
-        Order    order;   // used when type == AddOrder
+        Order    order;     // used when type == AddOrder
         OrderId  cancel_id; // used when type == CancelOrder
     };
+
+    Command() : type(CommandType::AddOrder), order{} {}
 
     // Named constructors — cleaner than direct construction
     static Command add(Order o) {
@@ -34,4 +36,7 @@ struct Command {
         return c;
     }
 };
-}
+
+static_assert(std::is_trivially_copyable_v<Command>, "Command must be trivially copyable for binary logging");
+
+} // namespace orderbook
