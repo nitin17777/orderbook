@@ -124,6 +124,75 @@ Every time two orders match, a Fill is emitted:
 
 ---
 
+## Event Model (Task 2.1)
+
+### Commands vs Events
+
+| Layer | File | Purpose |
+|---|---|---|
+| Command | `command.hpp` | *Intent* — raw input (Add, Cancel) stored in the binary log |
+| Event | `events.hpp` | *Fact* — what the engine actually did, with sequence numbers |
+
+Downstream consumers (market-data feed, gateway, ledger, audit) subscribe to
+the **event stream** and never need to touch matching logic.
+
+### Event Types
+
+| Tag | Struct | When emitted |
+|---|---|---|
+| `OrderAccepted` | `EventOrderAccepted` | Order passes validation; precedes any Fill events |
+| `OrderRejected` | `EventOrderRejected` | Validation fails; engine state unchanged |
+| `Fill` | `EventFill` | One per matched maker; taker price = maker price |
+| `OrderCancelled` | `EventOrderCancelled` | Resting order successfully removed |
+| `CancelRejected` | `EventCancelRejected` | Cancel failed (UnknownOrder / Unauthorized) |
+| `OrderModified` | *(reserved)* | Not yet implemented |
+
+### Ordering Guarantees
+
+1. Events for a single command are **contiguous** — no interleaving between commands.
+2. Sequence numbers are **monotonically increasing with no gaps** (1, 2, 3, …).
+3. Within one command, sub-events appear in a fixed canonical order:
+   - `add` accepted → `OrderAccepted` → `[Fill…]`
+   - `add` rejected → `OrderRejected`
+   - `cancel` success → `OrderCancelled`
+   - `cancel` failed  → `CancelRejected`
+4. Replaying the same command sequence always produces **byte-identical events**.
+
+### Sink Contract (allocation-free)
+
+```cpp
+// Any callable matching this concept is a valid sink:
+template<typename S>
+concept EventSink = requires(S& s, const Event& e) { { s(e) }; };
+
+// Built-in sinks:
+NullSink{}      // discards all events — zero cost; use in benchmarks
+VectorSink{}    // collects into std::vector<Event> — use in tests / replay
+```
+
+The engine calls the sink **synchronously** in sequence-number order.
+No heap allocation is performed per `add()` / `cancel()` call.
+
+### Binary Stability
+
+Every event struct is **fixed-size** and **trivially copyable** (enforced with
+`static_assert`). The `EventHeader` is a common 24-byte prefix on every event.
+The discriminator tag occupies a full `uint8_t`; values ≥ 6 are reserved.
+
+### Event Sizes
+
+| Struct | Size |
+|---|---|
+| `EventHeader` | 24 bytes |
+| `EventOrderAccepted` | 40 bytes |
+| `EventOrderRejected` | 40 bytes |
+| `EventFill` | 56 bytes |
+| `EventOrderCancelled` | 40 bytes |
+| `EventCancelRejected` | 40 bytes |
+| `Event` (union) | 56 bytes |
+
+---
+
 ## What is Out of Scope (for now)
 - IOC / FOK order types
 - Order modification (cancel-replace)
