@@ -48,7 +48,7 @@ private:
 
 class PriceLevelArray {
 public:
-    PriceLevelArray() : levels_(NUM_LEVELS) {}
+    PriceLevelArray() : levels_(NUM_LEVELS), qty_(NUM_LEVELS, 0) {}
 
     void push(Price price, OrderId id) {
         levels_[index(price)].push_back(id);
@@ -71,15 +71,23 @@ public:
         return levels_[index(price)];
     }
 
+    // ── Per-level aggregate quantity ──────────────────────────────────────────
+    // Maintained incrementally by FastOrderBook (not by PriceLevelArray itself).
+    // PriceLevelArray exposes mutable accessors so FastOrderBook can adjust them.
+    Quantity& qty(Price price)        { return qty_[index(price)]; }
+    Quantity  qty(Price price) const  { return qty_[index(price)]; }
+
     // Clear all levels — each deque.clear() is O(n) elements,
     // but the deque objects themselves stay allocated in the vector.
     // This is the cheap reset — no heap alloc/free of the 10k slots.
-    void clear() {                          // ← added
+    void clear() {
         for (auto& q : levels_) q.clear();
+        std::fill(qty_.begin(), qty_.end(), Quantity{0});
     }
 
 private:
     std::vector<std::deque<OrderId>> levels_;
+    std::vector<Quantity>            qty_;     // per-level aggregate resting qty
 
     static std::size_t index(Price price) {
         assert(price >= MIN_PRICE && price <= MAX_PRICE);
@@ -103,6 +111,18 @@ public:
     const PriceLevelArray& bids() const { return bids_; }
     const PriceLevelArray& asks() const { return asks_; }
     const OrderPool&       pool() const { return pool_; }
+
+    // ── Per-level aggregate quantity (L2 depth support) ───────────────────────
+    // Returns the total resting quantity at the given price level.
+    // The aggregate is maintained incrementally:
+    //   • Incremented when an order rests (rest()).
+    //   • Decremented by fill quantity during matching.
+    //   • Decremented by remaining_qty at cancel time (lazy-cancel policy:
+    //     tombstones left in the deque are NOT counted — the aggregate is
+    //     adjusted immediately when cancel() is called, not when the stale
+    //     ID is later skipped during a match walk).
+    Quantity bid_level_qty(Price price) const { return bids_.qty(price); }
+    Quantity ask_level_qty(Price price) const { return asks_.qty(price); }
 
     // Reset all state. The 10k deque slots stay allocated — only contents
     // are cleared. Construction cost is paid once; reset is cheap per iter.

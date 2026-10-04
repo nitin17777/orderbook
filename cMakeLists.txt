@@ -52,6 +52,7 @@ add_executable(orderbook_tests
   tests/test_engine.cpp
   tests/differential/test_snapshot.cpp
   tests/differential/test_differential.cpp
+  tests/differential/test_market_data.cpp
 )
 target_include_directories(orderbook_tests PRIVATE tests/differential)
 target_link_libraries(orderbook_tests PRIVATE orderbook_lib Catch2::Catch2WithMain)

@@ -16,14 +16,17 @@ void FastOrderBook::rest(Order order) {
     Price p = order.price;
     Side  s = order.side;
     OrderId id = order.id;
+    Quantity open_qty = order.open_quantity();
 
     pool_.insert(std::move(order));
 
     if (s == Side::Buy) {
         bids_.push(p, id);
+        bids_.qty(p) += open_qty;     // increment aggregate
         if (p > best_bid_price_) best_bid_price_ = p;
     } else {
         asks_.push(p, id);
+        asks_.qty(p) += open_qty;     // increment aggregate
         if (p < best_ask_price_) best_ask_price_ = p;
     }
 }
@@ -95,6 +98,12 @@ std::vector<Fill> FastOrderBook::match(Order& incoming) {
                 incoming.filled += trade_qty;
                 maker->filled   += trade_qty;
 
+                // Decrement aggregate on the maker (ask) side.
+                // Note: we only adjust for actual matched quantity, NOT for lazy
+                // tombstones skipped above — those were already subtracted at
+                // cancel() time (lazy-cancel policy).
+                asks_.qty(level_price) -= trade_qty;
+
                 if (incoming.open_quantity() == 0)
                     incoming.status = OrderStatus::Filled;
                 else
@@ -140,6 +149,9 @@ std::vector<Fill> FastOrderBook::match(Order& incoming) {
                 incoming.filled += trade_qty;
                 maker->filled   += trade_qty;
 
+                // Decrement aggregate on the maker (bid) side.
+                bids_.qty(level_price) -= trade_qty;
+
                 if (incoming.open_quantity() == 0)
                     incoming.status = OrderStatus::Filled;
                 else
@@ -181,18 +193,23 @@ bool FastOrderBook::cancel(OrderId id) {
 
     // Save side before erasing — pool_.erase() invalidates the pointer.
     const Side side = o->side;
+    const Price price = o->price;
+    const Quantity remaining = o->open_quantity();
+
+    // Lazy-cancel policy: subtract the remaining quantity from the aggregate
+    // immediately at cancel time.  The tombstone ID stays in the deque and
+    // will be skipped during future match walks, but the aggregate is already
+    // correct — we do NOT adjust it again when the stale ID is skipped.
+    if (side == Side::Buy)
+        bids_.qty(price) -= remaining;
+    else
+        asks_.qty(price) -= remaining;
 
     // Lazy deletion — mark cancelled in pool.
-    // The queue entry is skipped next time matching walks past it;
-    // update_best_*_after_removal() will also drain it if it was at the
-    // best-price level.
     o->status = OrderStatus::Cancelled;
     pool_.erase(id); // o is dangling after this line — do not use
 
     // Update best price tracking if needed.
-    // update_best_*_after_removal() now peeks into the pool to skip any
-    // stale queue entries, so it correctly finds the true best level even
-    // when lazy-deleted IDs are still sitting in the deques.
     if (side == Side::Buy)
         update_best_bid_after_removal();
     else

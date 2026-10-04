@@ -33,14 +33,27 @@ const Order* OrderBook::find(OrderId id) const {
 
 void OrderBook::rest(Order order) {
     order_index_[order.id] = { order.price, order.side };
-    if (order.side == Side::Buy)
+    if (order.side == Side::Buy) {
         bids_[order.price].push_back(order);
-    else
+        bid_qty_[order.price] += order.open_quantity();
+    } else {
         asks_[order.price].push_back(order);
+        ask_qty_[order.price] += order.open_quantity();
+    }
 }
 
 void OrderBook::remove_from_index(OrderId id) {
     order_index_.erase(id);
+}
+
+void OrderBook::subtract_level_qty(Side side, Price price, Quantity qty) {
+    auto& qtys = (side == Side::Buy) ? bid_qty_ : ask_qty_;
+    auto it = qtys.find(price);
+    if (it == qtys.end()) return;
+    if (it->second <= qty)
+        qtys.erase(it);
+    else
+        it->second -= qty;
 }
 
 // Core matching logic
@@ -73,6 +86,10 @@ std::vector<Fill> OrderBook::match(Order& incoming) {
                 // Update quantities
                 incoming.filled += trade_qty;
                 maker.filled    += trade_qty;
+
+                // Adjust per-level aggregate (maker's side)
+                Side maker_side = (incoming.side == Side::Buy) ? Side::Sell : Side::Buy;
+                subtract_level_qty(maker_side, level_price, trade_qty);
 
                 // Update statuses
                 if (incoming.open_quantity() == 0)
@@ -125,13 +142,16 @@ bool OrderBook::cancel(OrderId id) {
 
     const auto& loc = it->second;
 
-    auto cancel_from = [&](auto& levels) -> bool {
+    auto cancel_from = [&](auto& levels, Side side) -> bool {
         auto level_it = levels.find(loc.price);
         if (level_it == levels.end()) return false;
 
         auto& queue = level_it->second;
         for (auto q_it = queue.begin(); q_it != queue.end(); ++q_it) {
             if (q_it->id == id) {
+                // Lazy-cancel policy: adjust aggregate immediately at cancel time.
+                subtract_level_qty(side, loc.price, q_it->open_quantity());
+
                 q_it->status = OrderStatus::Cancelled;
                 queue.erase(q_it);
                 if (queue.empty())
@@ -144,9 +164,9 @@ bool OrderBook::cancel(OrderId id) {
     };
 
     if (loc.side == Side::Buy)
-        return cancel_from(bids_);
+        return cancel_from(bids_, Side::Buy);
     else
-        return cancel_from(asks_);
+        return cancel_from(asks_, Side::Sell);
 }
 
 } // namespace orderbook

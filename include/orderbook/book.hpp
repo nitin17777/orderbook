@@ -37,9 +37,35 @@ public:
 
     std::size_t order_count() const { return order_index_.size(); }
 
+    // ── Per-level aggregate quantity (L2 depth support) ───────────────────────
+    // Returns the total resting quantity at the given price level, or 0 if the
+    // level does not exist.  Maintained incrementally: decremented on fill and
+    // on cancel (lazy-cancel policy — adjusted at cancel time, not at tombstone
+    // skip, because OrderBook uses eager deletion so there are no tombstones).
+    Quantity bid_level_qty(Price price) const {
+        auto it = bid_qty_.find(price);
+        return (it != bid_qty_.end()) ? it->second : 0;
+    }
+    Quantity ask_level_qty(Price price) const {
+        auto it = ask_qty_.find(price);
+        return (it != ask_qty_.end()) ? it->second : 0;
+    }
+
+    // Full aggregated depth maps (price → total qty).  Bids and asks share the
+    // same key type (Price); callers iterate bids in reverse for descending order.
+    const std::map<Price, Quantity>& bid_quantities() const { return bid_qty_; }
+    const std::map<Price, Quantity>& ask_quantities() const { return ask_qty_; }
+
 private:
     BidLevels bids_;
     AskLevels asks_;
+
+    // Per-level aggregate resting quantity (L2 depth aggregates).
+    // Maintained incrementally alongside bids_/asks_.
+    // Uses std::map<Price,Quantity> (ascending key) for both sides.
+    // Invariant: qty > 0 iff the level exists in bids_/asks_.
+    std::map<Price, Quantity> bid_qty_;
+    std::map<Price, Quantity> ask_qty_;
 
     // id → pointer into the deque for O(1) cancel lookup
     // We store the price + side so we can find the right level fast
@@ -57,6 +83,10 @@ private:
 
     // Remove a fully filled or cancelled order from the index
     void remove_from_index(OrderId id);
+
+    // Adjust per-level aggregate: subtract `qty` from the given side/price.
+    // Removes the entry when it reaches zero.
+    void subtract_level_qty(Side side, Price price, Quantity qty);
 };
 
 } // namespace orderbook
