@@ -76,3 +76,53 @@ add_executable(orderbook_cli
   src/main.cpp
 )
 target_link_libraries(orderbook_cli PRIVATE orderbook_lib)
+
+# ── Gateway (Task 4.2) ────────────────────────────────────────────────────────
+# Requires Boost (headers: Asio + Beast) and nlohmann/json.
+# Both are installed by MSYS2 pacman into C:/msys64/mingw64.
+# We add that tree as a hint so find_package can locate the cmake configs.
+
+set(MSYS2_MINGW64 "C:/msys64/mingw64" CACHE PATH "MSYS2 mingw64 sysroot")
+
+# Boost 1.67+ ships cmake config files; Beast and Asio are header-only.
+list(APPEND CMAKE_PREFIX_PATH "${MSYS2_MINGW64}")
+find_package(Boost 1.80 QUIET COMPONENTS system)
+
+# nlohmann_json ships its own cmake config
+find_package(nlohmann_json 3.0 QUIET)
+
+if(Boost_FOUND AND nlohmann_json_FOUND)
+  message(STATUS "Building orderbook_gateway  (Boost ${Boost_VERSION},"
+          " nlohmann_json ${nlohmann_json_VERSION})")
+
+  add_executable(orderbook_gateway src/gateway.cpp)
+  target_include_directories(orderbook_gateway PRIVATE
+    "${MSYS2_MINGW64}/include"   # Boost + nlohmann headers
+  )
+  target_link_libraries(orderbook_gateway PRIVATE
+    orderbook_lib
+    nlohmann_json::nlohmann_json
+  )
+  # Boost.Asio / Beast are header-only; only system + ws2_32 needed on Windows
+  if(WIN32)
+    target_link_libraries(orderbook_gateway PRIVATE ws2_32 mswsock)
+  endif()
+  target_compile_definitions(orderbook_gateway PRIVATE
+    BOOST_ASIO_HEADER_ONLY
+    _WIN32_WINNT=0x0601       # Windows 7+ for Winsock2
+    NOMINMAX
+  )
+  target_compile_options(orderbook_gateway PRIVATE -g0 -O2)
+  target_link_options(orderbook_gateway PRIVATE -s)
+else()
+  if(NOT Boost_FOUND)
+    message(WARNING
+      "Boost not found — orderbook_gateway will NOT be built.\n"
+      "Install via: pacman -S mingw-w64-x86_64-boost")
+  endif()
+  if(NOT nlohmann_json_FOUND)
+    message(WARNING
+      "nlohmann_json not found — orderbook_gateway will NOT be built.\n"
+      "Install via: pacman -S mingw-w64-x86_64-nlohmann-json")
+  endif()
+endif()
