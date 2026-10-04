@@ -1,15 +1,14 @@
 #include "orderbook/engine.hpp"
+#include "orderbook/event_log.hpp"
 
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
 
-
 using namespace orderbook;
 
-// ── Display helpers
-// ───────────────────────────────────────────────────────────
+// ── Display helpers ───────────────────────────────────────────────────────────
 
 static void print_help() {
   std::cout << "\nCommands:\n"
@@ -19,6 +18,8 @@ static void print_help() {
             << "  mkt sell <qty>           - submit a market sell order\n"
             << "  cancel <id>              - cancel a resting order\n"
             << "  book                     - display current order book\n"
+            << "  bbo                      - display Best Bid / Offer (BBO) & spread\n"
+            << "  log                      - inspect all persisted WAL commands on disk\n"
             << "  help                     - show this message\n"
             << "  quit                     - exit\n\n";
 }
@@ -30,8 +31,36 @@ static void print_fills(const std::vector<Fill> &fills) {
   }
 }
 
+static void print_log_file(const std::string& path) {
+  try {
+    auto commands = EventLog::read_all(path);
+    std::cout << "\n=== Binary WAL Log: " << path << " (" << commands.size() << " commands) ===\n";
+    if (commands.empty()) {
+      std::cout << "  (Log is currently empty)\n\n";
+      return;
+    }
+    for (size_t i = 0; i < commands.size(); ++i) {
+      const auto& c = commands[i];
+      std::cout << "  [" << std::setw(3) << i << "] ";
+      if (c.type == CommandType::AddOrder) {
+        std::cout << "ADD    ID=" << std::setw(3) << c.order.id << " "
+                  << (c.order.side == Side::Buy ? "BUY " : "SELL") << " "
+                  << (c.order.type == OrderType::Limit ? "LIMIT " : "MKT   ")
+                  << std::setw(4) << c.order.quantity << " @ "
+                  << std::setw(4) << c.order.price
+                  << " (ts=" << c.order.timestamp << ")";
+      } else {
+        std::cout << "CANCEL ID=" << std::setw(3) << c.cancel_id;
+      }
+      std::cout << "\n";
+    }
+    std::cout << "========================================================\n\n";
+  } catch (const std::exception& e) {
+    std::cout << "  Cannot read log: " << e.what() << "\n\n";
+  }
+}
+
 static void print_book(const OrderBook &book) {
-  // Collect bid levels (already sorted descending by std::map)
   const auto &bids = book.bids();
   const auto &asks = book.asks();
 
@@ -43,7 +72,6 @@ static void print_book(const OrderBook &book) {
   auto bid_it = bids.begin();
   auto ask_it = asks.begin();
 
-  // Print up to 8 levels on each side
   int levels = 0;
   while ((bid_it != bids.end() || ask_it != asks.end()) && levels < 8) {
     std::string bid_str, ask_str;
@@ -52,8 +80,7 @@ static void print_book(const OrderBook &book) {
       Quantity total = 0;
       for (const auto &o : bid_it->second)
         total += o.open_quantity();
-      bid_str =
-          std::to_string(bid_it->first) + " [" + std::to_string(total) + "]";
+      bid_str = std::to_string(bid_it->first) + " [" + std::to_string(total) + "]";
       ++bid_it;
     }
 
@@ -61,8 +88,7 @@ static void print_book(const OrderBook &book) {
       Quantity total = 0;
       for (const auto &o : ask_it->second)
         total += o.open_quantity();
-      ask_str =
-          std::to_string(ask_it->first) + " [" + std::to_string(total) + "]";
+      ask_str = "[" + std::to_string(total) + "] " + std::to_string(ask_it->first);
       ++ask_it;
     }
 
@@ -73,8 +99,7 @@ static void print_book(const OrderBook &book) {
   std::cout << "\n";
 }
 
-// ── Order id counter
-// ──────────────────────────────────────────────────────────
+// ── Order id counter ──────────────────────────────────────────────────────────
 
 static OrderId next_id = 1;
 
@@ -104,24 +129,28 @@ static Order make_market(Side side, Quantity qty) {
   return o;
 }
 
-// ── Main loop
-// ─────────────────────────────────────────────────────────────────
+// ── Main loop ─────────────────────────────────────────────────────────────────
 
 int main(int argc, char *argv[]) {
+  if (argc > 2 && std::string(argv[1]) == "--dump") {
+    print_log_file(argv[2]);
+    return 0;
+  }
+
   std::string log_path = "orderbook.log";
-  if (argc > 1)
+  if (argc > 1 && std::string(argv[1]) != "--dump")
     log_path = argv[1];
 
   Engine engine(log_path);
 
-  std::cout << "OrderBook Engine - log: " << log_path << "\n";
-  std::cout << "Type 'help' for commands.\n\n";
+  std::cout << "OrderBook Engine - WAL file: " << log_path << "\n";
+  std::cout << "Type 'help' for commands, 'log' to inspect WAL on disk.\n\n";
 
   std::string line;
   while (true) {
     std::cout << "> ";
     if (!std::getline(std::cin, line))
-      break; // EOF
+      break;
 
     std::istringstream ss(line);
     std::string cmd;
@@ -140,6 +169,28 @@ int main(int argc, char *argv[]) {
 
     if (cmd == "book") {
       print_book(engine.book());
+      continue;
+    }
+
+    if (cmd == "bbo") {
+      auto bid = engine.book().best_bid();
+      auto ask = engine.book().best_ask();
+      std::cout << "\n=== BBO (Best Bid / Offer) ===\n";
+      if (bid) std::cout << "  Best Bid: " << *bid << " (qty: " << engine.book().bid_level_qty(*bid) << ")\n";
+      else     std::cout << "  Best Bid: (none)\n";
+      if (ask) std::cout << "  Best Ask: " << *ask << " (qty: " << engine.book().ask_level_qty(*ask) << ")\n";
+      else     std::cout << "  Best Ask: (none)\n";
+      if (bid && ask) {
+        std::cout << "  Spread:   " << (*ask - *bid) << "\n";
+        std::cout << "  Mid:      " << ((*bid + *ask) / 2.0) << "\n";
+      }
+      std::cout << "\n";
+      continue;
+    }
+
+    if (cmd == "log") {
+      engine.flush();
+      print_log_file(log_path);
       continue;
     }
 

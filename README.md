@@ -61,21 +61,26 @@ orderbook/
 │   ├── types.hpp       # Price, Quantity, OrderId, Side, enums
 │   ├── order.hpp       # Order and Fill structs
 │   ├── fill.hpp        # Fill event
-│   ├── book.hpp        # Naive OrderBook
-│   ├── fast_book.hpp   # Optimized FastOrderBook
+│   ├── events.hpp      # Canonical binary event model
+│   ├── market_data.hpp # L2 depth publisher, BBO, and public trade feed
+│   ├── book.hpp        # Naive OrderBook (with L2 aggregates)
+│   ├── fast_book.hpp   # Optimized FastOrderBook (with L2 aggregates)
 │   ├── command.hpp     # Command type for event log
 │   ├── event_log.hpp   # Append-only binary event log
-│   └── engine.hpp      # Engine: log + book combined
+│   └── engine.hpp      # Engine: validation + log + book combined
 ├── src/
 │   ├── book.cpp
 │   ├── fast_book.cpp
 │   ├── engine.cpp
-│   └── main.cpp        # Interactive CLI
+│   └── main.cpp        # Interactive CLI with WAL & BBO inspection
 ├── tests/
-│   ├── test_order.cpp  # Core type and book tests (20 cases)
-│   └── test_engine.cpp # Engine and replay tests (5 cases)
+│   ├── test_order.cpp  # Core type and book tests
+│   ├── test_engine.cpp # Engine and replay tests
+│   └── differential/   # Differential fuzzing, L2 reconstruction & BBO tests
 ├── benchmarks/
 │   └── bench_order.cpp # Google Benchmark suite
+├── docs/
+│   └── wire_protocol.md# Gateway & Client Wire Protocol Specification
 ├── SPEC.md             # Design spec written before any code
 ├── BENCHMARKS.md       # Benchmark results with analysis
 └── CMakeLists.txt
