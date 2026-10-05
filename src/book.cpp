@@ -1,4 +1,5 @@
 #include "orderbook/book.hpp"
+#include <algorithm>
 
 namespace orderbook {
 
@@ -56,18 +57,14 @@ void OrderBook::subtract_level_qty(Side side, Price price, Quantity qty) {
         it->second -= qty;
 }
 
-// Core matching logic
 std::vector<Fill> OrderBook::match(Order& incoming) {
     std::vector<Fill> fills;
 
-    // Choose the opposite side levels to match against
-    // Buy order matches against asks (ascending), sell against bids (descending)
     auto try_match = [&](auto& levels) {
         while (incoming.open_quantity() > 0 && !levels.empty()) {
-            auto level_it = levels.begin(); // best price on opposite side
+            auto level_it = levels.begin();
             Price level_price = level_it->first;
 
-            // Price check — limit orders cannot match beyond their limit
             if (incoming.type == OrderType::Limit) {
                 if (incoming.side == Side::Buy  && level_price > incoming.price) break;
                 if (incoming.side == Side::Sell && level_price < incoming.price) break;
@@ -77,21 +74,16 @@ std::vector<Fill> OrderBook::match(Order& incoming) {
 
             while (incoming.open_quantity() > 0 && !queue.empty()) {
                 Order& maker = queue.front();
-                Quantity trade_qty = std::min(incoming.open_quantity(),
-                                              maker.open_quantity());
+                Quantity trade_qty = std::min(incoming.open_quantity(), maker.open_quantity());
 
-                // Record the fill
                 fills.push_back({ incoming.id, maker.id, level_price, trade_qty });
 
-                // Update quantities
                 incoming.filled += trade_qty;
                 maker.filled    += trade_qty;
 
-                // Adjust per-level aggregate (maker's side)
                 Side maker_side = (incoming.side == Side::Buy) ? Side::Sell : Side::Buy;
                 subtract_level_qty(maker_side, level_price, trade_qty);
 
-                // Update statuses
                 if (incoming.open_quantity() == 0)
                     incoming.status = OrderStatus::Filled;
                 else
@@ -104,7 +96,6 @@ std::vector<Fill> OrderBook::match(Order& incoming) {
                 }
             }
 
-            // Clean up empty price level
             if (queue.empty())
                 levels.erase(level_it);
         }
@@ -118,18 +109,48 @@ std::vector<Fill> OrderBook::match(Order& incoming) {
     return fills;
 }
 
+bool OrderBook::can_fully_fill(const Order& incoming) const {
+    Quantity needed = incoming.quantity;
+    if (needed == 0) return true;
+
+    if (incoming.side == Side::Buy) {
+        for (const auto& [price, queue] : asks_) {
+            if (incoming.type == OrderType::Limit && price > incoming.price) break;
+            for (const auto& maker : queue) {
+                Quantity avail = maker.open_quantity();
+                if (avail >= needed) return true;
+                needed -= avail;
+            }
+        }
+    } else {
+        for (const auto& [price, queue] : bids_) {
+            if (incoming.type == OrderType::Limit && price < incoming.price) break;
+            for (const auto& maker : queue) {
+                Quantity avail = maker.open_quantity();
+                if (avail >= needed) return true;
+                needed -= avail;
+            }
+        }
+    }
+    return false;
+}
+
 std::vector<Fill> OrderBook::add(Order order) {
-    // Market orders never rest — cancel remainder after matching
+    if (order.tif == TimeInForce::FOK) {
+        if (!can_fully_fill(order)) {
+            order.status = OrderStatus::Cancelled;
+            return {};
+        }
+    }
+
     auto fills = match(order);
 
-    if (order.type == OrderType::Market) {
-        // Whatever didn't fill is cancelled — market orders don't rest
+    if (order.type == OrderType::Market || order.tif == TimeInForce::IOC || order.tif == TimeInForce::FOK) {
         if (order.open_quantity() > 0)
             order.status = OrderStatus::Cancelled;
         return fills;
     }
 
-    // Limit order: rest remainder in book if not fully filled
     if (order.open_quantity() > 0)
         rest(order);
 
@@ -138,7 +159,7 @@ std::vector<Fill> OrderBook::add(Order order) {
 
 bool OrderBook::cancel(OrderId id) {
     auto it = order_index_.find(id);
-    if (it == order_index_.end()) return false; // not found — silent no-op
+    if (it == order_index_.end()) return false;
 
     const auto& loc = it->second;
 
@@ -149,9 +170,7 @@ bool OrderBook::cancel(OrderId id) {
         auto& queue = level_it->second;
         for (auto q_it = queue.begin(); q_it != queue.end(); ++q_it) {
             if (q_it->id == id) {
-                // Lazy-cancel policy: adjust aggregate immediately at cancel time.
                 subtract_level_qty(side, loc.price, q_it->open_quantity());
-
                 q_it->status = OrderStatus::Cancelled;
                 queue.erase(q_it);
                 if (queue.empty())
@@ -167,6 +186,65 @@ bool OrderBook::cancel(OrderId id) {
         return cancel_from(bids_, Side::Buy);
     else
         return cancel_from(asks_, Side::Sell);
+}
+
+// Priority rules:
+//   Reducing quantity at same price     => retain queue position (in-place edit)
+//   Increasing quantity at same price   => lose queue position (cancel + re-add)
+//   Changing price (any direction)      => lose queue position (cancel + re-add)
+//
+// The cancel-replace path goes through add() so a price-crossing modify may
+// immediately fill against resting orders on the opposite side.
+std::vector<Fill> OrderBook::modify(OrderId id, Price new_price, Quantity new_qty, Timestamp ts) {
+    auto it = order_index_.find(id);
+    if (it == order_index_.end()) return {};
+
+    const auto loc = it->second;
+
+    // Must use a generic lambda to handle BidLevels (std::greater) and
+    // AskLevels (std::less) separately; a ternary auto& fails because the
+    // two map types have different comparators and are not the same type.
+    auto do_modify = [&](auto& levels) -> std::vector<Fill> {
+        auto level_it = levels.find(loc.price);
+        if (level_it == levels.end()) return {};
+
+        auto& queue = level_it->second;
+        for (auto q_it = queue.begin(); q_it != queue.end(); ++q_it) {
+            if (q_it->id != id) continue;
+
+            const Quantity old_open = q_it->open_quantity();
+
+            // Priority-retaining: same price, quantity can only shrink
+            if (new_price == loc.price && new_qty <= old_open) {
+                const Quantity reduce_by = old_open - new_qty;
+                q_it->quantity -= reduce_by;
+                subtract_level_qty(loc.side, loc.price, reduce_by);
+                return {};
+            }
+
+            // Priority-losing: cancel the resting order, re-add at back of queue
+            Order updated = *q_it;
+            subtract_level_qty(loc.side, loc.price, old_open);
+            queue.erase(q_it);
+            if (queue.empty())
+                levels.erase(level_it);
+            remove_from_index(id);
+
+            updated.price     = new_price;
+            updated.quantity  = new_qty;
+            updated.filled    = 0;
+            updated.timestamp = ts;
+            updated.status    = OrderStatus::Accepted;
+
+            return add(updated);
+        }
+        return {};
+    };
+
+    if (loc.side == Side::Buy)
+        return do_modify(bids_);
+    else
+        return do_modify(asks_);
 }
 
 } // namespace orderbook

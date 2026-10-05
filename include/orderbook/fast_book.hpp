@@ -63,6 +63,16 @@ public:
         levels_[index(price)].pop_front();  // O(1) — deque
     }
 
+    void erase(Price price, OrderId id) {
+        auto& q = levels_[index(price)];
+        for (auto it = q.begin(); it != q.end(); ++it) {
+            if (*it == id) {
+                q.erase(it);
+                break;
+            }
+        }
+    }
+
     bool empty(Price price) const {
         return levels_[index(price)].empty();
     }
@@ -101,6 +111,7 @@ class FastOrderBook {
 public:
     std::vector<Fill> add(Order order);
     bool cancel(OrderId id);
+    std::vector<Fill> modify(OrderId id, Price new_price, Quantity new_qty, Timestamp ts = 0);
 
     std::optional<Price> best_bid() const;
     std::optional<Price> best_ask() const;
@@ -143,6 +154,7 @@ private:
     Price best_ask_price_ = MAX_PRICE + 1;
 
     std::vector<Fill> match(Order& incoming);
+    bool can_fully_fill(const Order& incoming) const;
     void rest(Order order);
     void update_best_bid_after_removal();
     void update_best_ask_after_removal();

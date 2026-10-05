@@ -240,15 +240,11 @@ inline L2ReconstructResult run_l2_reconstruction_check(
             o.type      = (cmd.kind == CommandKind::LimitOrder)
                               ? OrderType::Limit : OrderType::Market;
             o.status    = OrderStatus::Accepted;
+            o.tif       = cmd.tif;
             o.price     = cmd.price;
             o.quantity  = cmd.quantity;
             o.filled    = 0;
             o.timestamp = cmd.timestamp;
-
-            // We need the original qty for the publisher's resting calc.
-            // Register it before the add so on_accepted can pick it up.
-            // (We call notify_order_original_qty after process(OrderAccepted)
-            //  inside the sink loop below.)
 
             engine.add(o, sink);
 
@@ -262,7 +258,7 @@ inline L2ReconstructResult run_l2_reconstruction_check(
             if (ev.tag() == EventTag::OrderAccepted &&
                     (cmd.kind == CommandKind::LimitOrder ||
                      cmd.kind == CommandKind::MarketOrder)) {
-                pub.notify_order_accepted(cmd.id, cmd.side, cmd.price, cmd.quantity);
+                pub.notify_order_accepted(cmd.id, cmd.side, cmd.price, cmd.quantity, cmd.tif);
             }
 
             L2Update updates = pub.process(ev);

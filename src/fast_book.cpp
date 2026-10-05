@@ -173,14 +173,69 @@ std::vector<Fill> FastOrderBook::match(Order& incoming) {
     return fills;
 }
 
+bool FastOrderBook::can_fully_fill(const Order& incoming) const {
+    Quantity needed = incoming.quantity;
+    if (needed == 0) return true;
+
+    if (incoming.side == Side::Buy) {
+        Price p = best_ask_price_;
+        while (p <= MAX_PRICE && needed > 0) {
+            if (incoming.type == OrderType::Limit && p > incoming.price)
+                break;
+
+            const auto& q = asks_.queue(p);
+            for (OrderId maker_id : q) {
+                const Order* maker = pool_.get(maker_id);
+                if (!maker || maker->is_terminal()) {
+                    continue; // Lazy deletion tombstone
+                }
+                Quantity avail = maker->open_quantity();
+                if (avail >= needed) return true;
+                needed -= avail;
+            }
+            ++p;
+        }
+    } else {
+        Price p = best_bid_price_;
+        while (p >= MIN_PRICE && needed > 0) {
+            if (incoming.type == OrderType::Limit && p < incoming.price)
+                break;
+
+            const auto& q = bids_.queue(p);
+            for (OrderId maker_id : q) {
+                const Order* maker = pool_.get(maker_id);
+                if (!maker || maker->is_terminal()) {
+                    continue; // Lazy deletion tombstone
+                }
+                Quantity avail = maker->open_quantity();
+                if (avail >= needed) return true;
+                needed -= avail;
+            }
+            --p;
+        }
+    }
+    return false;
+}
+
 std::vector<Fill> FastOrderBook::add(Order order) {
+    // FOK pre-check: fill entire quantity or leave book untouched
+    if (order.tif == TimeInForce::FOK) {
+        if (!can_fully_fill(order)) {
+            order.status = OrderStatus::Cancelled;
+            return {};
+        }
+    }
+
     auto fills = match(order);
 
-    if (order.type == OrderType::Market) {
-        // Market orders never rest
+    // Market, IOC, and FOK orders never rest in the book
+    if (order.type == OrderType::Market || order.tif == TimeInForce::IOC || order.tif == TimeInForce::FOK) {
+        if (order.open_quantity() > 0)
+            order.status = OrderStatus::Cancelled;
         return fills;
     }
 
+    // Limit GTC order: rest remainder in book if not fully filled
     if (order.open_quantity() > 0)
         rest(order);
 
@@ -216,6 +271,51 @@ bool FastOrderBook::cancel(OrderId id) {
         update_best_ask_after_removal();
 
     return true;
+}
+
+std::vector<Fill> FastOrderBook::modify(OrderId id, Price new_price, Quantity new_qty, Timestamp ts) {
+    Order* o = pool_.get(id);
+    if (!o || o->is_terminal()) return {};
+
+    const Side side = o->side;
+    const Price old_price = o->price;
+    const Quantity old_open = o->open_quantity();
+
+    // Priority-retaining case: same price and reduced quantity
+    if (new_price == old_price && new_qty <= old_open) {
+        Quantity reduce_by = old_open - new_qty;
+        o->quantity -= reduce_by;
+        if (side == Side::Buy)
+            bids_.qty(old_price) -= reduce_by;
+        else
+            asks_.qty(old_price) -= reduce_by;
+        return {};
+    }
+
+    // Priority-losing case: price changed or quantity increased
+    // Remove from old level queue and subtract old level quantity
+    if (side == Side::Buy) {
+        bids_.erase(old_price, id);
+        bids_.qty(old_price) -= old_open;
+        if (old_price == best_bid_price_)
+            update_best_bid_after_removal();
+    } else {
+        asks_.erase(old_price, id);
+        asks_.qty(old_price) -= old_open;
+        if (old_price == best_ask_price_)
+            update_best_ask_after_removal();
+    }
+
+    Order updated = *o;
+    pool_.erase(id); // remove old entry from pool so add(updated) can re-insert
+
+    updated.price     = new_price;
+    updated.quantity  = new_qty;
+    updated.filled    = 0;
+    updated.timestamp = ts;
+    updated.status    = OrderStatus::Accepted;
+
+    return add(updated);
 }
 
 } // namespace orderbook

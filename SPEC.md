@@ -7,21 +7,26 @@ same sequence of commands, it always produces the same sequence of fills.
 
 ---
 
-## Order Types
+## Order Types & Time-in-Force (TIF)
+
+### Time-in-Force Semantics
+- **GTC (Good 'Til Cancelled)**: Default execution policy. Fills available matching quantity immediately and rests any unfilled remainder in the order book.
+- **IOC (Immediate Or Cancel)**: Fills whatever quantity is immediately available at or within the limit price; any unfilled tail is cancelled immediately without resting in the book (emits an `OrderCancelled` event for the remainder).
+- **FOK (Fill Or Kill)**: Either executes the entire order quantity across available price levels immediately, or executes nothing (0 fills) and cancels the entire order immediately without mutating the order book state.
+- **Market Orders**: Market orders execute against best available opposite liquidity up to their requested quantity; unfilled remainders are cancelled immediately without resting (behaving consistently with IOC semantics).
 
 ### Limit Order
-- Has a price and a quantity.
-- Rests in the book if it cannot be immediately filled.
+- Has a price, quantity, and Time-in-Force (`GTC`, `IOC`, or `FOK`).
 - Matches against the opposite side at its limit price or better.
+- Rests in the book only if `TIF == GTC` and has an unfilled open quantity.
 
 ### Market Order
-- Has no price, it takes the best available price on the opposite side.
-- Never rests in the book.
-- If liquidity is insufficient, fills what it can and the remainder is cancelled.
+- Has no price, takes the best available price on the opposite side.
+- Never rests in the book (IOC semantics). If liquidity is insufficient, fills what it can and cancels the remainder. If `FOK` is specified, fills the entire quantity or kills the order.
 
 ### Cancel
 - Removes a resting limit order by its OrderId.
-- Cancelling a non-existent or already-filled order is silently ignored.
+- Cancelling a non-existent or already-filled order is rejected cleanly.
 
 ---
 
@@ -145,7 +150,7 @@ the **event stream** and never need to touch matching logic.
 | `Fill` | `EventFill` | One per matched maker; taker price = maker price |
 | `OrderCancelled` | `EventOrderCancelled` | Resting order successfully removed |
 | `CancelRejected` | `EventCancelRejected` | Cancel failed (UnknownOrder / Unauthorized) |
-| `OrderModified` | *(reserved)* | Not yet implemented |
+| `OrderModified` | `EventOrderModified` | Order price/quantity modified |
 
 ### Ordering Guarantees
 
@@ -156,6 +161,8 @@ the **event stream** and never need to touch matching logic.
    - `add` rejected → `OrderRejected`
    - `cancel` success → `OrderCancelled`
    - `cancel` failed  → `CancelRejected`
+   - `modify` success → `OrderModified` → `[Fill…]`
+   - `modify` failed  → `OrderRejected`
 4. Replaying the same command sequence always produces **byte-identical events**.
 
 ### Sink Contract (allocation-free)
@@ -171,7 +178,7 @@ VectorSink{}    // collects into std::vector<Event> — use in tests / replay
 ```
 
 The engine calls the sink **synchronously** in sequence-number order.
-No heap allocation is performed per `add()` / `cancel()` call.
+No heap allocation is performed per `add()` / `cancel()` / `modify()` call.
 
 ### Binary Stability
 
@@ -189,13 +196,11 @@ The discriminator tag occupies a full `uint8_t`; values ≥ 6 are reserved.
 | `EventFill` | 56 bytes |
 | `EventOrderCancelled` | 40 bytes |
 | `EventCancelRejected` | 40 bytes |
+| `EventOrderModified` | 56 bytes |
 | `Event` (union) | 56 bytes |
 
 ---
 
 ## What is Out of Scope (for now)
-- IOC / FOK order types
-- Order modification (cancel-replace)
-- Networking / wire protocol
 - Persistence (added in a later milestone)
 - Multi-threaded access

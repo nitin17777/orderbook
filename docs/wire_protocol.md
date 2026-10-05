@@ -93,6 +93,7 @@ Submits a new Limit or Market order.
     "client_order_id": 5001,
     "side": "buy",
     "order_type": "limit",
+    "time_in_force": "gtc",
     "price": 10050,
     "quantity": 10
   }
@@ -104,6 +105,7 @@ Submits a new Limit or Market order.
 - `client_order_id` (`uint64`, required): Per-user unique client order ID.
 - `side` (`string`, required): `"buy"` or `"sell"`.
 - `order_type` (`string`, required): `"limit"` or `"market"`.
+- `time_in_force` (`string`, optional, default `"gtc"`): `"gtc"`, `"ioc"`, or `"fok"`.
 - `price` (`int64`, required for limit): Price in integer ticks (must be `> 0` for limit orders; ignored for market orders).
 - `quantity` (`uint64`, required): Order size in integer lots (must be `> 0`).
 
@@ -138,7 +140,44 @@ Cancels an active resting order by internal `order_id` or by `(user_id, client_o
 
 ---
 
-### 3.3 Channel Subscription (`subscribe`)
+### 3.3 Modify Order (`modify_order`)
+Modifies the price and/or quantity of an active resting order by `order_id` or `(user_id, client_order_id)`.
+
+#### Priority Rules:
+- **Reducing quantity at unchanged price**: Retains queue priority (FIFO position preserved).
+- **Increasing quantity or changing price**: Loses queue priority (moved to back of queue or aggressive cross). If new price crosses the spread, aggressive matching occurs immediately.
+
+#### Option A: Modify by `order_id`
+```json
+{
+  "req_id": "cl-mod-001",
+  "type": "modify_order",
+  "payload": {
+    "user_id": 101,
+    "order_id": 2049,
+    "new_price": 10050,
+    "new_quantity": 5
+  }
+}
+```
+
+#### Option B: Modify by `client_order_id`
+```json
+{
+  "req_id": "cl-mod-002",
+  "type": "modify_order",
+  "payload": {
+    "user_id": 101,
+    "client_order_id": 5001,
+    "new_price": 10050,
+    "new_quantity": 15
+  }
+}
+```
+
+---
+
+### 3.4 Channel Subscription (`subscribe`)
 Subscribes the connection to one or more public or private streams.
 
 ```json
@@ -272,7 +311,32 @@ Emitted when an active resting order is successfully removed from the book.
 
 ---
 
-### 4.5 Cancel Rejected (`cancel_rejected`)
+### 4.5 Order Modified (`order_modified`)
+Emitted when an active resting order has been successfully modified in price and/or quantity.
+
+```json
+{
+  "req_id": "cl-mod-001",
+  "type": "order_modified",
+  "channel": "private.orders",
+  "seq": 105,
+  "timestamp": 1712234000320000,
+  "status": "ok",
+  "payload": {
+    "order_id": 2049,
+    "client_order_id": 5001,
+    "user_id": 101,
+    "side": "buy",
+    "new_price": 10050,
+    "new_quantity": 5,
+    "status": "modified"
+  }
+}
+```
+
+---
+
+### 4.6 Cancel Rejected (`cancel_rejected`)
 Emitted when a cancel request fails (e.g., unknown order ID or unauthorized caller).
 
 ```json
@@ -280,7 +344,7 @@ Emitted when a cancel request fails (e.g., unknown order ID or unauthorized call
   "req_id": "cl-cancel-003",
   "type": "cancel_rejected",
   "channel": "private.orders",
-  "seq": 105,
+  "seq": 106,
   "timestamp": 1712234000350000,
   "status": "error",
   "error": {

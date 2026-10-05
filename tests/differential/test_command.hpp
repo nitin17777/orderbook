@@ -8,7 +8,8 @@ namespace orderbook::test {
 enum class CommandKind : uint8_t {
     LimitOrder,
     MarketOrder,
-    CancelOrder
+    CancelOrder,
+    ModifyOrder
 };
 
 struct TestCommand {
@@ -18,17 +19,31 @@ struct TestCommand {
     Price       price{0};
     Quantity    quantity{0};
     Timestamp   timestamp{0};
+    TimeInForce tif{TimeInForce::GTC};
 
-    static TestCommand limit(OrderId id, Side side, Price price, Quantity qty, Timestamp ts = 0) {
-        return TestCommand{CommandKind::LimitOrder, id, side, price, qty, ts};
+    static TestCommand limit(OrderId id, Side side, Price price, Quantity qty, Timestamp ts = 0, TimeInForce tif = TimeInForce::GTC) {
+        return TestCommand{CommandKind::LimitOrder, id, side, price, qty, ts, tif};
     }
 
-    static TestCommand market(OrderId id, Side side, Quantity qty, Timestamp ts = 0) {
-        return TestCommand{CommandKind::MarketOrder, id, side, 0, qty, ts};
+    static TestCommand ioc(OrderId id, Side side, Price price, Quantity qty, Timestamp ts = 0) {
+        return TestCommand{CommandKind::LimitOrder, id, side, price, qty, ts, TimeInForce::IOC};
+    }
+
+    static TestCommand fok(OrderId id, Side side, Price price, Quantity qty, Timestamp ts = 0) {
+        return TestCommand{CommandKind::LimitOrder, id, side, price, qty, ts, TimeInForce::FOK};
+    }
+
+    static TestCommand market(OrderId id, Side side, Quantity qty, Timestamp ts = 0, TimeInForce tif = TimeInForce::IOC) {
+        return TestCommand{CommandKind::MarketOrder, id, side, 0, qty, ts, tif};
     }
 
     static TestCommand cancel(OrderId id) {
-        return TestCommand{CommandKind::CancelOrder, id, Side::Buy, 0, 0, 0};
+        return TestCommand{CommandKind::CancelOrder, id, Side::Buy, 0, 0, 0, TimeInForce::GTC};
+    }
+
+    // Modify: new_price stored in 'price', new_qty in 'quantity', new_ts in 'timestamp'
+    static TestCommand modify(OrderId id, Price new_price, Quantity new_qty, Timestamp ts = 0) {
+        return TestCommand{CommandKind::ModifyOrder, id, Side::Buy, new_price, new_qty, ts, TimeInForce::GTC};
     }
 
     bool operator==(const TestCommand& other) const = default;
@@ -37,15 +52,19 @@ struct TestCommand {
 inline std::ostream& operator<<(std::ostream& os, const TestCommand& cmd) {
     switch (cmd.kind) {
     case CommandKind::LimitOrder:
-        os << "LIMIT [id=" << cmd.id << " " << (cmd.side == Side::Buy ? "BUY" : "SELL")
+        os << "LIMIT [" << to_string(cmd.tif) << " id=" << cmd.id << " " << (cmd.side == Side::Buy ? "BUY" : "SELL")
            << " qty=" << cmd.quantity << " @" << cmd.price << " ts=" << cmd.timestamp << "]";
         break;
     case CommandKind::MarketOrder:
-        os << "MARKET [id=" << cmd.id << " " << (cmd.side == Side::Buy ? "BUY" : "SELL")
+        os << "MARKET [" << to_string(cmd.tif) << " id=" << cmd.id << " " << (cmd.side == Side::Buy ? "BUY" : "SELL")
            << " qty=" << cmd.quantity << " ts=" << cmd.timestamp << "]";
         break;
     case CommandKind::CancelOrder:
         os << "CANCEL [id=" << cmd.id << "]";
+        break;
+    case CommandKind::ModifyOrder:
+        os << "MODIFY [id=" << cmd.id << " new_price=" << cmd.price
+           << " new_qty=" << cmd.quantity << " ts=" << cmd.timestamp << "]";
         break;
     }
     return os;

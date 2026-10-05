@@ -22,14 +22,16 @@ public:
         ++current_timestamp_;
         
         // Operation distribution:
-        // ~65% Limit Orders, ~15% Market Orders, ~20% Cancels
-        std::discrete_distribution<int> kind_dist({65, 15, 20});
+        // ~58% Limit Orders, ~12% Market Orders, ~18% Cancels, ~12% Modifies
+        std::discrete_distribution<int> kind_dist({58, 12, 18, 12});
         int choice = kind_dist(rng_);
 
         if (choice == 2 && !submitted_ids_.empty()) {
             return generate_cancel();
         } else if (choice == 1) {
             return generate_market();
+        } else if (choice == 3 && !active_ids_.empty()) {
+            return generate_modify();
         } else {
             return generate_limit();
         }
@@ -100,17 +102,30 @@ private:
         }
     }
 
+    TimeInForce random_tif() {
+        // 70% GTC, 15% IOC, 15% FOK
+        std::discrete_distribution<int> tif_dist({70, 15, 15});
+        int t = tif_dist(rng_);
+        if (t == 0) return TimeInForce::GTC;
+        if (t == 1) return TimeInForce::IOC;
+        return TimeInForce::FOK;
+    }
+
     TestCommand generate_limit() {
         OrderId id = next_order_id_++;
         submitted_ids_.push_back(id);
-        active_ids_.push_back(id);
+        TimeInForce tif = random_tif();
+        if (tif == TimeInForce::GTC) {
+            active_ids_.push_back(id);
+        }
 
         return TestCommand::limit(
             id,
             random_side(),
             random_price(),
             random_quantity(),
-            current_timestamp_
+            current_timestamp_,
+            tif
         );
     }
 
@@ -118,11 +133,16 @@ private:
         OrderId id = next_order_id_++;
         submitted_ids_.push_back(id);
 
+        // 80% IOC, 20% FOK for market orders
+        std::bernoulli_distribution fok_dist(0.2);
+        TimeInForce tif = fok_dist(rng_) ? TimeInForce::FOK : TimeInForce::IOC;
+
         return TestCommand::market(
             id,
             random_side(),
             random_quantity(),
-            current_timestamp_
+            current_timestamp_,
+            tif
         );
     }
 
@@ -150,6 +170,17 @@ private:
             std::uniform_int_distribution<OrderId> dist(900'000, 999'999);
             return TestCommand::cancel(dist(rng_));
         }
+    }
+
+    TestCommand generate_modify() {
+        // Pick a random active order to modify
+        std::uniform_int_distribution<size_t> idx_dist(0, active_ids_.size() - 1);
+        OrderId target = active_ids_[idx_dist(rng_)];
+
+        Price new_price = random_price();
+        Quantity new_qty = random_quantity();
+
+        return TestCommand::modify(target, new_price, new_qty, current_timestamp_);
     }
 };
 

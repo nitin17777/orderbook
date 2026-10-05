@@ -6,7 +6,15 @@ namespace orderbook {
 
 enum class CommandType : uint8_t {
     AddOrder    = 1,
-    CancelOrder = 2
+    CancelOrder = 2,
+    ModifyOrder = 3
+};
+
+struct ModifyPayload {
+    OrderId   id;
+    Price     new_price;
+    Quantity  new_quantity;
+    Timestamp timestamp;
 };
 
 // A Command is the unit of the event log.
@@ -15,8 +23,9 @@ enum class CommandType : uint8_t {
 struct Command {
     CommandType type;
     union {
-        Order    order;     // used when type == AddOrder
-        OrderId  cancel_id; // used when type == CancelOrder
+        Order         order;     // used when type == AddOrder
+        OrderId       cancel_id; // used when type == CancelOrder
+        ModifyPayload mod;      // used when type == ModifyOrder
     };
 
     Command() : type(CommandType::AddOrder), order{} {}
@@ -33,6 +42,16 @@ struct Command {
         Command c;
         c.type      = CommandType::CancelOrder;
         c.cancel_id = id;
+        return c;
+    }
+
+    static Command modify(OrderId id, Price new_price, Quantity new_qty, Timestamp ts = 0) {
+        Command c;
+        c.type             = CommandType::ModifyOrder;
+        c.mod.id           = id;
+        c.mod.new_price    = new_price;
+        c.mod.new_quantity = new_qty;
+        c.mod.timestamp    = ts;
         return c;
     }
 };

@@ -31,6 +31,15 @@ struct CancelResult {
     explicit operator bool() const { return accepted; }
 };
 
+// Result of modifying an order in the Engine
+struct ModifyResult {
+    bool              accepted{false};
+    RejectReason      reason{RejectReason::None};
+    std::vector<Fill> fills{};
+
+    explicit operator bool() const { return accepted; }
+};
+
 // Engine wraps OrderBook with an EventLog, identity tracking, and input validation.
 // Every command is validated prior to state mutation.
 // Valid commands are logged before being applied (event-sourcing principle).
@@ -94,6 +103,7 @@ public:
             ev.accepted.order_id   = order.id;
             ev.accepted.side       = order.side;
             ev.accepted.order_type = order.type;
+            ev.accepted.tif        = order.tif;
             sink(ev);
         }
 
@@ -101,8 +111,12 @@ public:
         log_.append(Command::add(order));
         auto fills = book_.add(order);
 
+        Quantity total_filled = 0;
+
         // 5. Emit one Fill event per matched maker
         for (const auto& f : fills) {
+            total_filled += f.quantity;
+
             Event ev{};
             ev.fill.header   = make_header(EventTag::Fill, now);
             ev.fill.taker_id = f.taker_id;
@@ -116,12 +130,27 @@ public:
                 cleanup_client_mapping(f.maker_id);
         }
 
-        // 6. Index the resting order's client ID mapping
-        if (book_.find(order.id) != nullptr) {
-            if (order.user_id != INVALID_USER_ID && order.client_order_id != INVALID_CLIENT_ORDER_ID) {
-                UserClientKey key{order.user_id, order.client_order_id};
-                client_to_order_id_[key] = order.id;
-                order_to_client_key_[order.id] = key;
+        // 6. Handle unfilled remainder or index resting order
+        bool is_ioc_or_fok = (order.tif == TimeInForce::IOC || order.tif == TimeInForce::FOK);
+        bool is_market = (order.type == OrderType::Market);
+
+        if (is_ioc_or_fok || is_market) {
+            Quantity remaining = order.quantity - total_filled;
+            if (remaining > 0) {
+                Event ev{};
+                ev.cancelled.header        = make_header(EventTag::OrderCancelled, now);
+                ev.cancelled.order_id      = order.id;
+                ev.cancelled.remaining_qty = remaining;
+                sink(ev);
+            }
+        } else {
+            // Index the resting order's client ID mapping
+            if (book_.find(order.id) != nullptr) {
+                if (order.user_id != INVALID_USER_ID && order.client_order_id != INVALID_CLIENT_ORDER_ID) {
+                    UserClientKey key{order.user_id, order.client_order_id};
+                    client_to_order_id_[key] = order.id;
+                    order_to_client_key_[order.id] = key;
+                }
             }
         }
 
@@ -214,6 +243,111 @@ public:
         return cancel_by_client_id(user_id, client_order_id, s);
     }
 
+    // ── modify (with event sink) ─────────────────────────────────────────────
+    template<EventSink Sink>
+    ModifyResult modify(OrderId id, Price new_price, Quantity new_qty, UserId user_id, Sink& sink) {
+        const Timestamp now = engine_clock();
+        const Order* existing = book_.find(id);
+
+        auto reject = [&](RejectReason reason) -> ModifyResult {
+            Event ev{};
+            ev.rejected.header   = make_header(EventTag::OrderRejected, now);
+            ev.rejected.order_id = id;
+            ev.rejected.reason   = reason;
+            sink(ev);
+            return ModifyResult{false, reason, {}};
+        };
+
+        if (existing == nullptr)
+            return reject(RejectReason::UnknownOrder);
+
+        if (user_id != INVALID_USER_ID && existing->user_id != INVALID_USER_ID && existing->user_id != user_id)
+            return reject(RejectReason::Unauthorized);
+
+        if (new_qty == 0)
+            return reject(RejectReason::InvalidQuantity);
+
+        if (new_price <= 0)
+            return reject(RejectReason::InvalidPrice);
+
+        Side side = existing->side;
+
+        // 1. Emit EventOrderModified before state change
+        {
+            Event ev{};
+            ev.modified.header       = make_header(EventTag::OrderModified, now);
+            ev.modified.order_id     = id;
+            ev.modified.new_price    = new_price;
+            ev.modified.new_quantity = new_qty;
+            ev.modified.side         = side;
+            sink(ev);
+        }
+
+        // 2. Log before mutating book (source of truth)
+        log_.append(Command::modify(id, new_price, new_qty, now));
+
+        // 3. Execute modification in book
+        auto fills = book_.modify(id, new_price, new_qty, now);
+
+        // 4. Emit Fill events if matched
+        for (const auto& f : fills) {
+            Event ev{};
+            ev.fill.header   = make_header(EventTag::Fill, now);
+            ev.fill.taker_id = f.taker_id;
+            ev.fill.maker_id = f.maker_id;
+            ev.fill.price    = f.price;
+            ev.fill.quantity = f.quantity;
+            sink(ev);
+
+            if (book_.find(f.maker_id) == nullptr)
+                cleanup_client_mapping(f.maker_id);
+        }
+
+        // 5. Clean up client mapping if modified order was fully filled
+        if (book_.find(id) == nullptr) {
+            cleanup_client_mapping(id);
+        }
+
+        return ModifyResult{true, RejectReason::None, std::move(fills)};
+    }
+
+    ModifyResult modify(OrderId id, Price new_price, Quantity new_qty, UserId user_id = INVALID_USER_ID) {
+        NullSink s;
+        return modify(id, new_price, new_qty, user_id, s);
+    }
+
+    template<EventSink Sink>
+    ModifyResult modify_by_client_id(UserId user_id, ClientOrderId client_order_id, Price new_price, Quantity new_qty, Sink& sink) {
+        if (user_id == INVALID_USER_ID || client_order_id == INVALID_CLIENT_ORDER_ID) {
+            const Timestamp now = engine_clock();
+            Event ev{};
+            ev.rejected.header   = make_header(EventTag::OrderRejected, now);
+            ev.rejected.order_id = INVALID_ORDER_ID;
+            ev.rejected.reason   = RejectReason::UnknownOrder;
+            sink(ev);
+            return ModifyResult{false, RejectReason::UnknownOrder, {}};
+        }
+
+        UserClientKey key{user_id, client_order_id};
+        auto it = client_to_order_id_.find(key);
+        if (it == client_to_order_id_.end()) {
+            const Timestamp now = engine_clock();
+            Event ev{};
+            ev.rejected.header   = make_header(EventTag::OrderRejected, now);
+            ev.rejected.order_id = INVALID_ORDER_ID;
+            ev.rejected.reason   = RejectReason::UnknownOrder;
+            sink(ev);
+            return ModifyResult{false, RejectReason::UnknownOrder, {}};
+        }
+
+        return modify(it->second, new_price, new_qty, user_id, sink);
+    }
+
+    ModifyResult modify_by_client_id(UserId user_id, ClientOrderId client_order_id, Price new_price, Quantity new_qty) {
+        NullSink s;
+        return modify_by_client_id(user_id, client_order_id, new_price, new_qty, s);
+    }
+
     // Lookup internal OrderId from UserId and ClientOrderId
     OrderId lookup_client_order(UserId user_id, ClientOrderId client_order_id) const {
         UserClientKey key{user_id, client_order_id};
@@ -244,6 +378,10 @@ public:
                                     fills.begin(), fills.end());
             } else if (cmd.type == CommandType::CancelOrder) {
                 result.book.cancel(cmd.cancel_id);
+            } else if (cmd.type == CommandType::ModifyOrder) {
+                auto fills = result.book.modify(cmd.mod.id, cmd.mod.new_price, cmd.mod.new_quantity, cmd.mod.timestamp);
+                result.fills.insert(result.fills.end(),
+                                    fills.begin(), fills.end());
             }
         }
         return result;

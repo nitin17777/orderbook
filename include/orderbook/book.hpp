@@ -25,6 +25,9 @@ public:
     // Cancel a resting order by id. Returns true if found and cancelled.
     bool cancel(OrderId id);
 
+    // Modify a resting order. Returns any fills generated if price crossed.
+    std::vector<Fill> modify(OrderId id, Price new_price, Quantity new_qty, Timestamp ts = 0);
+
     // Accessors — for testing and display
     const BidLevels& bids() const { return bids_; }
     const AskLevels& asks() const { return asks_; }
@@ -77,6 +80,9 @@ private:
 
     // Internal matching — called by add()
     std::vector<Fill> match(Order& incoming);
+
+    // Non-mutating liquidity check for FOK orders
+    bool can_fully_fill(const Order& incoming) const;
 
     // Place a resting order into the book after matching
     void rest(Order order);

@@ -50,6 +50,7 @@ struct PlaceOrderReq {
     ClientOrderId   client_order_id{INVALID_CLIENT_ORDER_ID};
     Side            side{Side::Buy};
     OrderType       order_type{OrderType::Limit};
+    TimeInForce     tif{TimeInForce::GTC};
     Price           price{0};
     Quantity        quantity{0};
 };
@@ -60,6 +61,15 @@ struct CancelOrderReq {
     // exactly one of order_id or client_order_id will be valid
     std::optional<OrderId>       order_id{};
     std::optional<ClientOrderId> client_order_id{};
+};
+
+struct ModifyOrderReq {
+    std::string                  req_id;
+    UserId                       user_id{INVALID_USER_ID};
+    std::optional<OrderId>       order_id{};
+    std::optional<ClientOrderId> client_order_id{};
+    Price                        new_price{0};
+    Quantity                     new_quantity{0};
 };
 
 struct SubscribeReq {
@@ -81,6 +91,7 @@ struct ParseError {
 using InboundMessage = std::variant<
     PlaceOrderReq,
     CancelOrderReq,
+    ModifyOrderReq,
     SubscribeReq,
     GetSnapshotReq,
     ParseError
@@ -96,6 +107,15 @@ inline std::string order_type_str(OrderType t) {
     return t == OrderType::Limit ? "limit" : "market";
 }
 
+inline std::string time_in_force_str(TimeInForce t) {
+    switch (t) {
+        case TimeInForce::GTC: return "gtc";
+        case TimeInForce::IOC: return "ioc";
+        case TimeInForce::FOK: return "fok";
+    }
+    return "gtc";
+}
+
 inline std::string reject_code(RejectReason r) {
     switch (r) {
         case RejectReason::InvalidPrice:           return "INVALID_PRICE";
@@ -106,6 +126,7 @@ inline std::string reject_code(RejectReason r) {
         case RejectReason::Unauthorized:           return "UNAUTHORIZED";
         case RejectReason::InvalidSide:            return "INVALID_SIDE";
         case RejectReason::InvalidType:            return "INVALID_ORDER_TYPE";
+        case RejectReason::InvalidTimeInForce:     return "INVALID_TIME_IN_FORCE";
         default:                                   return "UNKNOWN";
     }
 }
@@ -120,6 +141,7 @@ inline std::string reject_msg(RejectReason r) {
         case RejectReason::Unauthorized:           return "User ID does not own this order";
         case RejectReason::InvalidSide:            return "Side must be 'buy' or 'sell'";
         case RejectReason::InvalidType:            return "Order type must be 'limit' or 'market'";
+        case RejectReason::InvalidTimeInForce:     return "Time in force must be 'gtc', 'ioc', or 'fok'";
         default:                                   return "Unknown error";
     }
 }
@@ -152,6 +174,20 @@ inline InboundMessage decode(std::string_view text) {
             else if (ot == "market") req.order_type = OrderType::Market;
             else return ParseError{req_id, "INVALID_ORDER_TYPE", "Order type must be 'limit' or 'market'"};
 
+            if (p.contains("time_in_force")) {
+                std::string tif_s = p.at("time_in_force").get<std::string>();
+                if      (tif_s == "gtc" || tif_s == "GTC") req.tif = TimeInForce::GTC;
+                else if (tif_s == "ioc" || tif_s == "IOC") req.tif = TimeInForce::IOC;
+                else if (tif_s == "fok" || tif_s == "FOK") req.tif = TimeInForce::FOK;
+                else return ParseError{req_id, "INVALID_TIME_IN_FORCE", "time_in_force must be 'gtc', 'ioc', or 'fok'"};
+            } else if (p.contains("tif")) {
+                std::string tif_s = p.at("tif").get<std::string>();
+                if      (tif_s == "gtc" || tif_s == "GTC") req.tif = TimeInForce::GTC;
+                else if (tif_s == "ioc" || tif_s == "IOC") req.tif = TimeInForce::IOC;
+                else if (tif_s == "fok" || tif_s == "FOK") req.tif = TimeInForce::FOK;
+                else return ParseError{req_id, "INVALID_TIME_IN_FORCE", "time_in_force must be 'gtc', 'ioc', or 'fok'"};
+            }
+
             req.price    = p.value("price", Price{0});
             req.quantity = p.at("quantity").get<Quantity>();
             return req;
@@ -171,6 +207,25 @@ inline InboundMessage decode(std::string_view text) {
             else
                 return ParseError{req_id, "MALFORMED_JSON", "cancel_order requires order_id or client_order_id"};
 
+            return req;
+        }
+
+        // ── modify_order ─────────────────────────────────────────────────────
+        if (type == "modify_order") {
+            const auto& p = j.at("payload");
+            ModifyOrderReq req;
+            req.req_id  = req_id;
+            req.user_id = p.at("user_id").get<UserId>();
+
+            if (p.contains("order_id"))
+                req.order_id = p["order_id"].get<OrderId>();
+            else if (p.contains("client_order_id"))
+                req.client_order_id = p["client_order_id"].get<ClientOrderId>();
+            else
+                return ParseError{req_id, "MALFORMED_JSON", "modify_order requires order_id or client_order_id"};
+
+            req.new_price    = p.at("new_price").get<Price>();
+            req.new_quantity = p.at("new_quantity").get<Quantity>();
             return req;
         }
 
@@ -233,6 +288,7 @@ inline std::string encode_order_accepted(
             {"user_id",         req.user_id},
             {"side",            side_str(ev.side)},
             {"order_type",      order_type_str(ev.order_type)},
+            {"time_in_force",   time_in_force_str(ev.tif)},
             {"price",           req.price},
             {"quantity",        req.quantity},
             {"status",          "accepted"}
@@ -315,6 +371,33 @@ inline std::string encode_order_cancelled(
             {"user_id",         user_id},
             {"remaining_qty",   ev.remaining_qty},
             {"status",          "cancelled"}
+        }}
+    };
+    return j.dump();
+}
+
+inline std::string encode_order_modified(
+    const std::string& req_id,
+    const EventOrderModified& ev,
+    UserId user_id,
+    ClientOrderId clord_id,
+    uint64_t seq)
+{
+    json j = {
+        {"req_id",    req_id},
+        {"type",      "order_modified"},
+        {"channel",   "private.orders"},
+        {"seq",       seq},
+        {"timestamp", ev.header.engine_time},
+        {"status",    "ok"},
+        {"payload",   {
+            {"order_id",        ev.order_id},
+            {"client_order_id", clord_id},
+            {"user_id",         user_id},
+            {"side",            side_str(ev.side)},
+            {"new_price",       ev.new_price},
+            {"new_quantity",    ev.new_quantity},
+            {"status",          "modified"}
         }}
     };
     return j.dump();

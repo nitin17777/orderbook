@@ -23,7 +23,8 @@ struct Order {
     Side          side;
     OrderType     type;
     OrderStatus   status;
-    uint8_t       reserved[5]; // explicit pad to 64 bytes
+    TimeInForce   tif;
+    uint8_t       reserved[4]; // explicit pad to 64 bytes
 
     // Convenience: how much is still open
     Quantity open_quantity() const {

@@ -160,6 +160,7 @@ private:
             if constexpr (std::is_same_v<T, codec::ParseError>)       handle_error(req);
             else if constexpr (std::is_same_v<T, codec::PlaceOrderReq>)    handle_place(req);
             else if constexpr (std::is_same_v<T, codec::CancelOrderReq>)   handle_cancel(req);
+            else if constexpr (std::is_same_v<T, codec::ModifyOrderReq>)   handle_modify(req);
             else if constexpr (std::is_same_v<T, codec::SubscribeReq>)     handle_subscribe(req);
             else if constexpr (std::is_same_v<T, codec::GetSnapshotReq>)   handle_snapshot(req);
         }, msg);
@@ -183,6 +184,7 @@ private:
         order.client_order_id = req.client_order_id;
         order.side            = req.side;
         order.type            = req.order_type;
+        order.tif             = req.tif;
         order.price           = req.price;
         order.quantity        = req.quantity;
 
@@ -203,7 +205,7 @@ private:
                 taker_order_id = ev.accepted.order_id;
                 // Tell the feed about this order (price + qty for depth tracking)
                 state_.feed.notify_order_accepted(
-                    taker_order_id, req.side, req.price, req.quantity);
+                    taker_order_id, req.side, req.price, req.quantity, req.tif);
                 // Private ack to this session
                 enqueue(codec::encode_order_accepted(
                     req.req_id, ev.accepted, req, ev.header.seq));
@@ -228,6 +230,22 @@ private:
                 // Public market data via feed
                 state_.feed.process(ev,
                     [&](const PublicTrade& t)  { batch.trades.push_back(codec::encode_trade(t)); },
+                    [&](const BBO& b)           { batch.bbo = codec::encode_bbo(b); },
+                    [&](const L2Update& deltas) {
+                        for (const auto& d : deltas)
+                            batch.depth_deltas.push_back(codec::encode_depth_update(d));
+                    });
+                break;
+            }
+
+            case EventTag::OrderCancelled: {
+                if (ev.cancelled.order_id == taker_order_id) {
+                    enqueue(codec::encode_order_cancelled(
+                        req.req_id, ev.cancelled,
+                        req.user_id, req.client_order_id, ev.header.seq));
+                }
+                state_.feed.process(ev,
+                    [&](const PublicTrade&) {},
                     [&](const BBO& b)           { batch.bbo = codec::encode_bbo(b); },
                     [&](const L2Update& deltas) {
                         for (const auto& d : deltas)
@@ -287,6 +305,79 @@ private:
             state_.engine.cancel(*req.order_id, req.user_id, sink);
         else if (req.client_order_id.has_value())
             state_.engine.cancel_by_client_id(req.user_id, *req.client_order_id, sink);
+
+        broadcast(batch);
+    }
+
+    // ── Modify order ──────────────────────────────────────────────────────────
+
+    void handle_modify(const codec::ModifyOrderReq& req) {
+        ClientOrderId clord_id = req.client_order_id.value_or(INVALID_CLIENT_ORDER_ID);
+        BroadcastBatch batch;
+
+        Quantity taker_remaining = req.new_quantity;
+
+        auto sink = [&](const Event& ev) {
+            switch (ev.tag()) {
+            case EventTag::OrderModified: {
+                enqueue(codec::encode_order_modified(
+                    req.req_id, ev.modified,
+                    req.user_id, clord_id, ev.header.seq));
+                state_.feed.process(ev,
+                    [&](const PublicTrade&) {},
+                    [&](const BBO& b)           { batch.bbo = codec::encode_bbo(b); },
+                    [&](const L2Update& deltas) {
+                        for (const auto& d : deltas)
+                            batch.depth_deltas.push_back(codec::encode_depth_update(d));
+                    });
+                break;
+            }
+
+            case EventTag::OrderRejected:
+                enqueue(codec::encode_order_rejected(
+                    req.req_id, ev.rejected,
+                    codec::PlaceOrderReq{.req_id = req.req_id, .user_id = req.user_id, .client_order_id = clord_id},
+                    ev.header.seq));
+                break;
+
+            case EventTag::Fill: {
+                taker_remaining = (taker_remaining >= ev.fill.quantity)
+                    ? taker_remaining - ev.fill.quantity : 0;
+                bool fully_filled = (taker_remaining == 0);
+
+                codec::PlaceOrderReq taker_req;
+                taker_req.user_id = req.user_id;
+                taker_req.client_order_id = clord_id;
+                taker_req.price = req.new_price;
+                enqueue(codec::encode_execution_taker(
+                    req.req_id, ev.fill, taker_req,
+                    taker_remaining, fully_filled, ev.header.seq));
+
+                state_.feed.process(ev,
+                    [&](const PublicTrade& t)  { batch.trades.push_back(codec::encode_trade(t)); },
+                    [&](const BBO& b)           { batch.bbo = codec::encode_bbo(b); },
+                    [&](const L2Update& deltas) {
+                        for (const auto& d : deltas)
+                            batch.depth_deltas.push_back(codec::encode_depth_update(d));
+                    });
+                break;
+            }
+
+            default: break;
+            }
+        };
+
+        if (req.order_id.has_value())
+            state_.engine.modify(*req.order_id, req.new_price, req.new_quantity, req.user_id, sink);
+        else if (req.client_order_id.has_value())
+            state_.engine.modify_by_client_id(req.user_id, *req.client_order_id, req.new_price, req.new_quantity, sink);
+
+        state_.feed.flush_pending(
+            [&](const BBO& b)           { batch.bbo = codec::encode_bbo(b); },
+            [&](const L2Update& deltas) {
+                for (const auto& d : deltas)
+                    batch.depth_deltas.push_back(codec::encode_depth_update(d));
+            });
 
         broadcast(batch);
     }

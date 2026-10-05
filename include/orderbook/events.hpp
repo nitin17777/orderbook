@@ -90,7 +90,8 @@ struct EventOrderAccepted {
     OrderId     order_id;       // engine-assigned id
     Side        side;
     OrderType   order_type;
-    uint8_t     _pad[6]{};
+    TimeInForce tif;
+    uint8_t     _pad[5]{};
 };
 static_assert(sizeof(EventOrderAccepted) == 40);
 static_assert(std::is_trivially_copyable_v<EventOrderAccepted>);
@@ -148,6 +149,20 @@ struct EventCancelRejected {
 static_assert(sizeof(EventCancelRejected) == 40);
 static_assert(std::is_trivially_copyable_v<EventCancelRejected>);
 
+// Emitted when a resting order is modified.
+//
+// Layout: 24 (header) + 8 + 8 + 8 + 1 + 7 = 56 bytes
+struct EventOrderModified {
+    EventHeader header;
+    OrderId     order_id;
+    Price       new_price;
+    Quantity    new_quantity;
+    Side        side;
+    uint8_t     _pad[7]{};
+};
+static_assert(sizeof(EventOrderModified) == 56);
+static_assert(std::is_trivially_copyable_v<EventOrderModified>);
+
 // ── Tagged union wrapper ──────────────────────────────────────────────────────
 //
 // A single Event value that can hold any of the above types.
@@ -166,6 +181,7 @@ union Event {
     EventFill           fill;
     EventOrderCancelled cancelled;
     EventCancelRejected cancel_rejected;
+    EventOrderModified  modified;
 
     // Convenience typed accessor — no tag check, caller's responsibility.
     template<typename T>

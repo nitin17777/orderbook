@@ -196,13 +196,168 @@ async def test_abrupt_disconnect():
         assert ack["type"] == "order_accepted"
         print("  [PASS] Gateway is fully responsive after abrupt disconnect")
 
+async def test_time_in_force_ioc_fok():
+    print("\n--- Test 4: Time-In-Force (GTC, IOC, FOK) Execution Semantics ---")
+    import time
+    b = int(time.time() * 1000) % 1000000
+    async with websockets.connect(URI) as ws_maker, websockets.connect(URI) as ws_taker:
+        # Maker places resting Sell: 10 @ 200
+        await ws_maker.send(json.dumps({
+            "req_id": "m-tif-1",
+            "type": "place_order",
+            "payload": {
+                "user_id": 10,
+                "client_order_id": b + 101,
+                "side": "sell",
+                "order_type": "limit",
+                "time_in_force": "gtc",
+                "price": 200,
+                "quantity": 10
+            }
+        }))
+        m_ack = json.loads(await ws_maker.recv())
+        assert m_ack["type"] == "order_accepted"
+        assert m_ack["payload"]["time_in_force"] == "gtc"
+        print("  [PASS] Maker GTC resting order accepted")
+
+        # Taker places FOK Buy: 15 @ 200 (only 10 available) -> should be killed with 0 fills
+        await ws_taker.send(json.dumps({
+            "req_id": "t-fok-fail",
+            "type": "place_order",
+            "payload": {
+                "user_id": 20,
+                "client_order_id": b + 102,
+                "side": "buy",
+                "order_type": "limit",
+                "time_in_force": "fok",
+                "price": 200,
+                "quantity": 15
+            }
+        }))
+        fok_ack = json.loads(await ws_taker.recv())
+        assert fok_ack["type"] == "order_accepted"
+        assert fok_ack["payload"]["time_in_force"] == "fok"
+
+        fok_cxl = json.loads(await ws_taker.recv())
+        assert fok_cxl["type"] == "order_cancelled"
+        assert fok_cxl["payload"]["remaining_qty"] == 15
+        print("  [PASS] FOK with insufficient liquidity was killed immediately without fills")
+
+        # Taker places IOC Buy: 15 @ 200 (10 available) -> matches 10, cancels unfilled 5
+        await ws_taker.send(json.dumps({
+            "req_id": "t-ioc-part",
+            "type": "place_order",
+            "payload": {
+                "user_id": 20,
+                "client_order_id": b + 103,
+                "side": "buy",
+                "order_type": "limit",
+                "time_in_force": "ioc",
+                "price": 200,
+                "quantity": 15
+            }
+        }))
+        ioc_ack = json.loads(await ws_taker.recv())
+        assert ioc_ack["type"] == "order_accepted"
+        assert ioc_ack["payload"]["time_in_force"] == "ioc"
+
+        ioc_fill = json.loads(await ws_taker.recv())
+        assert ioc_fill["type"] == "execution"
+        assert ioc_fill["payload"]["filled_qty"] == 10
+        assert ioc_fill["payload"]["remaining_qty"] == 5
+
+        ioc_cxl = json.loads(await ws_taker.recv())
+        assert ioc_cxl["type"] == "order_cancelled"
+        assert ioc_cxl["payload"]["remaining_qty"] == 5
+        print("  [PASS] IOC partial fill matched available liquidity and discarded remainder")
+
+async def test_order_modification():
+    print("\n--- Test 5: Order Modification (Cancel-Replace & Priority) ---")
+    async with websockets.connect(URI) as ws_maker, websockets.connect(URI) as ws_taker:
+        import time
+        b = int(time.time() * 1000) % 1000000
+
+        # 1. Maker places Limit Buy @ 100, qty 20
+        await ws_maker.send(json.dumps({
+            "req_id": "m-mod-1",
+            "type": "place_order",
+            "payload": {
+                "user_id": 30,
+                "client_order_id": b + 201,
+                "side": "buy",
+                "order_type": "limit",
+                "price": 100,
+                "quantity": 20
+            }
+        }))
+        ack1 = json.loads(await ws_maker.recv())
+        assert ack1["type"] == "order_accepted"
+        order_id = ack1["payload"]["order_id"]
+
+        # 2. Maker modifies order: reduce qty 20 -> 10 (keeps priority)
+        await ws_maker.send(json.dumps({
+            "req_id": "m-mod-2",
+            "type": "modify_order",
+            "payload": {
+                "user_id": 30,
+                "order_id": order_id,
+                "new_price": 100,
+                "new_quantity": 10
+            }
+        }))
+        mod_ack = json.loads(await ws_maker.recv())
+        assert mod_ack["type"] == "order_modified"
+        assert mod_ack["payload"]["new_quantity"] == 10
+        assert mod_ack["payload"]["new_price"] == 100
+        print("  [PASS] Order quantity reduced via modify_order request")
+
+        # 3. Modify with price cross (triggers immediate match against new seller)
+        # First place a resting sell @ 105, qty 5
+        await ws_taker.send(json.dumps({
+            "req_id": "t-mod-seller",
+            "type": "place_order",
+            "payload": {
+                "user_id": 40,
+                "client_order_id": b + 202,
+                "side": "sell",
+                "order_type": "limit",
+                "price": 105,
+                "quantity": 5
+            }
+        }))
+        seller_ack = json.loads(await ws_taker.recv())
+        assert seller_ack["type"] == "order_accepted"
+
+        # Maker modifies remaining 10 @ 100 -> 10 @ 105 (crosses spread, fills 5)
+        await ws_maker.send(json.dumps({
+            "req_id": "m-mod-3",
+            "type": "modify_order",
+            "payload": {
+                "user_id": 30,
+                "client_order_id": b + 201,
+                "new_price": 105,
+                "new_quantity": 10
+            }
+        }))
+        mod_ack2 = json.loads(await ws_maker.recv())
+        assert mod_ack2["type"] == "order_modified"
+
+        fill_report = json.loads(await ws_maker.recv())
+        assert fill_report["type"] == "execution"
+        assert fill_report["payload"]["match_price"] == 105
+        assert fill_report["payload"]["filled_qty"] == 5
+        assert fill_report["payload"]["remaining_qty"] == 5
+        print("  [PASS] Crossing price modification triggered immediate fill")
+
 async def main():
     print(f"[Suite] Running WebSocket Gateway Test Suite against {URI}...")
     await test_basic_trading_and_feeds()
     await test_malformed_and_error_handling()
     await test_abrupt_disconnect()
+    await test_time_in_force_ioc_fok()
+    await test_order_modification()
     print("\n========================================")
-    print("  ALL GATEWAY SUITE TESTS PASSED (10/10) ")
+    print("  ALL GATEWAY SUITE TESTS PASSED (12/12) ")
     print("========================================")
 
 if __name__ == "__main__":

@@ -314,3 +314,135 @@ TEST_CASE("Fast: new order matches correct maker after cancel-then-insert", "[fa
     REQUIRE(fills[0].price     == 101); // fill at 101, not the stale 100
     REQUIRE(fills[0].maker_id  == 2);
 }
+
+// ── Time-in-Force (IOC / FOK) Tests ──────────────────────────────────────────
+
+static Order make_ioc(OrderId id, Side side, Price price, Quantity qty) {
+    Order o{};
+    o.id        = id;
+    o.side      = side;
+    o.type      = OrderType::Limit;
+    o.status    = OrderStatus::Accepted;
+    o.tif       = TimeInForce::IOC;
+    o.price     = price;
+    o.quantity  = qty;
+    o.filled    = 0;
+    o.timestamp = 0;
+    return o;
+}
+
+static Order make_fok(OrderId id, Side side, Price price, Quantity qty) {
+    Order o{};
+    o.id        = id;
+    o.side      = side;
+    o.type      = OrderType::Limit;
+    o.status    = OrderStatus::Accepted;
+    o.tif       = TimeInForce::FOK;
+    o.price     = price;
+    o.quantity  = qty;
+    o.filled    = 0;
+    o.timestamp = 0;
+    return o;
+}
+
+TEST_CASE("OrderBook: IOC partial fill leaves no resting remainder", "[tif][ioc]") {
+    OrderBook book;
+    book.add(make_limit(1, Side::Sell, 100, 5));
+
+    auto fills = book.add(make_ioc(2, Side::Buy, 100, 15));
+    REQUIRE(fills.size() == 1);
+    REQUIRE(fills[0].quantity == 5);
+    REQUIRE(book.order_count() == 0); // unfilled 10 is cancelled, does not rest
+    REQUIRE_FALSE(book.best_bid().has_value());
+    REQUIRE_FALSE(book.best_ask().has_value());
+}
+
+TEST_CASE("OrderBook: IOC against empty book matches 0 and does not rest", "[tif][ioc]") {
+    OrderBook book;
+    auto fills = book.add(make_ioc(1, Side::Buy, 100, 10));
+    REQUIRE(fills.empty());
+    REQUIRE(book.order_count() == 0);
+}
+
+TEST_CASE("OrderBook: FOK insufficient liquidity fills nothing and leaves book untouched", "[tif][fok]") {
+    OrderBook book;
+    book.add(make_limit(1, Side::Sell, 100, 5));
+    book.add(make_limit(2, Side::Sell, 101, 5));
+
+    // Wants 15 lots, but only 10 available total across levels
+    auto fills = book.add(make_fok(3, Side::Buy, 105, 15));
+    REQUIRE(fills.empty());
+    REQUIRE(book.order_count() == 2);
+    REQUIRE(book.best_ask() == 100);
+    REQUIRE(book.ask_level_qty(100) == 5);
+    REQUIRE(book.ask_level_qty(101) == 5);
+}
+
+TEST_CASE("OrderBook: FOK price limit insufficient liquidity fills nothing", "[tif][fok]") {
+    OrderBook book;
+    book.add(make_limit(1, Side::Sell, 100, 5));
+    book.add(make_limit(2, Side::Sell, 105, 10));
+
+    // Limit price is 100, only 5 available at 100
+    auto fills = book.add(make_fok(3, Side::Buy, 100, 10));
+    REQUIRE(fills.empty());
+    REQUIRE(book.order_count() == 2);
+    REQUIRE(book.ask_level_qty(100) == 5);
+}
+
+TEST_CASE("OrderBook: FOK exact liquidity sweeps all levels", "[tif][fok]") {
+    OrderBook book;
+    book.add(make_limit(1, Side::Sell, 100, 5));
+    book.add(make_limit(2, Side::Sell, 101, 5));
+
+    auto fills = book.add(make_fok(3, Side::Buy, 105, 10));
+    REQUIRE(fills.size() == 2);
+    REQUIRE(fills[0].quantity == 5);
+    REQUIRE(fills[1].quantity == 5);
+    REQUIRE(book.order_count() == 0);
+}
+
+TEST_CASE("FastOrderBook: IOC partial fill leaves no resting remainder", "[fast][tif][ioc]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Sell, 100, 5));
+
+    auto fills = book.add(make_ioc(2, Side::Buy, 100, 15));
+    REQUIRE(fills.size() == 1);
+    REQUIRE(fills[0].quantity == 5);
+    REQUIRE(book.order_count() == 0);
+    REQUIRE_FALSE(book.best_bid().has_value());
+    REQUIRE_FALSE(book.best_ask().has_value());
+}
+
+TEST_CASE("FastOrderBook: FOK insufficient liquidity leaves book untouched", "[fast][tif][fok]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Sell, 100, 5));
+    book.add(make_limit_f(2, Side::Sell, 101, 5));
+
+    auto fills = book.add(make_fok(3, Side::Buy, 105, 15));
+    REQUIRE(fills.empty());
+    REQUIRE(book.order_count() == 2);
+    REQUIRE(book.best_ask() == 100);
+    REQUIRE(book.ask_level_qty(100) == 5);
+    REQUIRE(book.ask_level_qty(101) == 5);
+}
+
+TEST_CASE("FastOrderBook: FOK against lazily cancelled makers skips tombstones correctly", "[fast][tif][fok]") {
+    FastOrderBook book;
+    book.add(make_limit_f(1, Side::Sell, 100, 10));
+    book.add(make_limit_f(2, Side::Sell, 100, 5));
+    book.cancel(1); // Order 1 is a tombstone now; only order 2 (5 lots) is live
+
+    // FOK for 10 lots must see that only 5 lots are live, so it fails atomically
+    auto fills = book.add(make_fok(3, Side::Buy, 100, 10));
+    REQUIRE(fills.empty());
+    REQUIRE(book.order_count() == 1);
+    REQUIRE(book.ask_level_qty(100) == 5);
+
+    // FOK for 5 lots should succeed
+    auto fills_ok = book.add(make_fok(4, Side::Buy, 100, 5));
+    REQUIRE(fills_ok.size() == 1);
+    REQUIRE(fills_ok[0].maker_id == 2);
+    REQUIRE(fills_ok[0].quantity == 5);
+    REQUIRE(book.order_count() == 0);
+}

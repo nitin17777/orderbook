@@ -33,6 +33,12 @@ enum class OrderStatus : uint8_t {
     Cancelled        = 3
 };
 
+enum class TimeInForce : uint8_t {
+    GTC = 0, // Good 'Til Cancelled
+    IOC = 1, // Immediate Or Cancel
+    FOK = 2  // Fill Or Kill
+};
+
 enum class RejectReason : uint8_t {
     None = 0,
     InvalidPrice,
@@ -42,7 +48,8 @@ enum class RejectReason : uint8_t {
     UnknownOrder,
     Unauthorized,
     InvalidSide,
-    InvalidType
+    InvalidType,
+    InvalidTimeInForce
 };
 
 inline const char* to_string(RejectReason reason) {
@@ -56,6 +63,16 @@ inline const char* to_string(RejectReason reason) {
         case RejectReason::Unauthorized:           return "Unauthorized";
         case RejectReason::InvalidSide:            return "InvalidSide";
         case RejectReason::InvalidType:            return "InvalidType";
+        case RejectReason::InvalidTimeInForce:     return "InvalidTimeInForce";
+    }
+    return "Unknown";
+}
+
+inline const char* to_string(TimeInForce tif) {
+    switch (tif) {
+        case TimeInForce::GTC: return "GTC";
+        case TimeInForce::IOC: return "IOC";
+        case TimeInForce::FOK: return "FOK";
     }
     return "Unknown";
 }

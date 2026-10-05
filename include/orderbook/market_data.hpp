@@ -230,6 +230,8 @@ public:
                 return on_fill(ev.fill);
             case EventTag::OrderCancelled:
                 return on_cancelled(ev.cancelled);
+            case EventTag::OrderModified:
+                return on_modified(ev.modified);
             // Rejected / CancelRejected / Reserved → no depth change
             default:
                 // Flush any pending resting order if a non-fill breaks the sequence
@@ -308,12 +310,13 @@ private:
     // integration layer via notify_order_accepted() before or immediately
     // after the OrderAccepted event is processed.
     struct PendingAccepted {
-        OrderId   order_id{0};
-        Side      side{Side::Buy};
-        OrderType order_type{OrderType::Limit};
-        Price     price{0};        // limit price — set via notify_order_accepted()
-        Quantity  original_qty{0}; // original submitted quantity — set via notify_order_accepted()
-        Quantity  qty_filled{0};   // accumulated fill qty so far
+        OrderId     order_id{0};
+        Side        side{Side::Buy};
+        OrderType   order_type{OrderType::Limit};
+        TimeInForce tif{TimeInForce::GTC};
+        Price       price{0};        // limit price — set via notify_order_accepted()
+        Quantity    original_qty{0}; // original submitted quantity — set via notify_order_accepted()
+        Quantity    qty_filled{0};   // accumulated fill qty so far
     };
     PendingAccepted pending_{};
     bool            has_pending_{false};
@@ -364,8 +367,9 @@ private:
         has_pending_ = false;
         const auto& pa = pending_;
 
-        // Market orders never rest.
-        if (pa.order_type == OrderType::Market) return deltas;
+        // Market, IOC, and FOK orders never rest.
+        if (pa.order_type == OrderType::Market || pa.tif == TimeInForce::IOC || pa.tif == TimeInForce::FOK)
+            return deltas;
 
         // The resting quantity is original_qty minus what was filled.
         Quantity rest_qty = (pa.original_qty > pa.qty_filled)
@@ -390,6 +394,7 @@ private:
         if (has_pending_ && pending_.order_id == ev.order_id) {
             pending_.side       = ev.side;
             pending_.order_type = ev.order_type;
+            pending_.tif        = ev.tif;
             return {};
         }
 
@@ -400,6 +405,7 @@ private:
             .order_id     = ev.order_id,
             .side         = ev.side,
             .order_type   = ev.order_type,
+            .tif          = ev.tif,
             .price        = 0,          // filled in from on_fill or external hint
             .original_qty = 0,          // filled in from on_fill
             .qty_filled   = 0
@@ -486,6 +492,33 @@ private:
         return deltas;
     }
 
+    L2Update on_modified(const EventOrderModified& ev) {
+        L2Update deltas = flush_pending_rested();
+
+        auto it = order_meta_.find(ev.order_id);
+        if (it != order_meta_.end()) {
+            const auto meta = it->second;
+            auto [new_qty, changed] = reduce_depth(meta.side, meta.price, meta.resting_qty);
+            order_meta_.erase(it);
+            if (changed) {
+                deltas.push_back(make_delta(meta.side, meta.price, new_qty));
+            }
+        }
+
+        pending_ = PendingAccepted{
+            .order_id     = ev.order_id,
+            .side         = ev.side,
+            .order_type   = OrderType::Limit,
+            .tif          = TimeInForce::GTC,
+            .price        = ev.new_price,
+            .original_qty = ev.new_quantity,
+            .qty_filled   = 0
+        };
+        has_pending_ = true;
+
+        return deltas;
+    }
+
 public:
     // ── Integration helpers (called by Engine wrapper / test harness) ─────────
     //
@@ -504,17 +537,19 @@ public:
     // Inject price + original_qty for the pending accepted order.
     // Must be called once per accepted limit order; safe to call before or
     // immediately after process(EventOrderAccepted).
-    void notify_order_accepted(OrderId id, Side side, Price price, Quantity qty) {
+    void notify_order_accepted(OrderId id, Side side, Price price, Quantity qty, TimeInForce tif = TimeInForce::GTC) {
         if (has_pending_ && pending_.order_id == id) {
             pending_.side         = side;   // reinforce in case on_accepted already set it
             pending_.price        = price;
             pending_.original_qty = qty;
+            pending_.tif          = tif;
         } else {
             flush_pending_rested();
             pending_ = PendingAccepted{
                 .order_id     = id,
                 .side         = side,
                 .order_type   = OrderType::Limit,
+                .tif          = tif,
                 .price        = price,
                 .original_qty = qty,
                 .qty_filled   = 0
@@ -661,8 +696,8 @@ public:
         }
     }
 
-    void notify_order_accepted(OrderId id, Side side, Price price, Quantity qty) {
-        pub_.notify_order_accepted(id, side, price, qty);
+    void notify_order_accepted(OrderId id, Side side, Price price, Quantity qty, TimeInForce tif = TimeInForce::GTC) {
+        pub_.notify_order_accepted(id, side, price, qty, tif);
     }
 
     L2Snapshot snapshot() const { return pub_.snapshot(); }
