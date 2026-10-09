@@ -111,6 +111,12 @@ private:
         return TimeInForce::FOK;
     }
 
+    UserId random_user() {
+        // Mix of active user IDs (1..4) and unassigned/anonymous (0)
+        std::uniform_int_distribution<UserId> dist(0, 4);
+        return dist(rng_);
+    }
+
     TestCommand generate_limit() {
         OrderId id = next_order_id_++;
         submitted_ids_.push_back(id);
@@ -125,7 +131,8 @@ private:
             random_price(),
             random_quantity(),
             current_timestamp_,
-            tif
+            tif,
+            random_user()
         );
     }
 
@@ -142,7 +149,8 @@ private:
             random_side(),
             random_quantity(),
             current_timestamp_,
-            tif
+            tif,
+            random_user()
         );
     }
 

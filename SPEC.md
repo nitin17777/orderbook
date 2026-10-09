@@ -126,6 +126,41 @@ Every time two orders match, a Fill is emitted:
 7. Zero quantity or non-positive limit price → returns rejection and leaves state unchanged.
 8. Multiple fills from one large incoming order → emits one Fill per matched order.
 9. Crossed book (ask < bid already in book) → should never happen if engine is correct; treat as an assertion.
+10. Self-trade attempt between orders of the same `UserId` → STP triggers; 0 fills between same user; taker remainder cancelled and maker preserved.
+
+---
+
+## Self-Trade Prevention (STP) (Task 5.3)
+
+### Purpose & Motivation
+Real-world exchanges and financial venues prevent wash trading and internal fills between orders submitted by the same participant (`UserId`). Allowing self-trades distorts volume metrics, creates artificial price signals, wastes trading fees, and violates market conduct regulations.
+
+### Selected Policy: Cancel Newest (Cancel Taker / Expire Aggressor)
+We implement the **Cancel Newest** policy (also known as *Cancel Aggressor* or *Expire Taker* in venues like CME, Nasdaq, and major digital asset exchanges):
+
+1. **Rule**:
+   - When an incoming aggressive order (the taker) traverses the order book and encounters a resting order (the maker) belonging to the **same `UserId`** (`taker.user_id == maker.user_id` where `user_id != INVALID_USER_ID`), matching stops immediately.
+   - The unexecuted remainder of the incoming taker order is **cancelled immediately** without resting in the book.
+   - The resting maker order remains **completely intact** in the book at its existing price level and retaining its exact FIFO queue position.
+
+2. **Design Rationale**:
+   - **Liquidity Preservation**: Resting orders represent passive liquidity already committed to the book. Preserving resting quotes prevents sudden liquidity holes and maintains orderly price discovery.
+   - **Market Maker & Algo Protection**: Automated market making algorithms continuously place passive quotes. If an algorithmic glitch or internal order from another desk of the same firm sends an aggressive cross order, "Cancel Newest" prevents wiping out the firm's passive quotes while ensuring no wash trading occurs.
+   - **Fairness to Prior Counterparties**: In a multi-order sweep, the aggressive order is allowed to execute against preceding resting orders belonging to *different* participants before it encounters its own order. Only upon reaching its own quote is the remaining tail cancelled.
+   - **Deterministic Invariants**: Cleanly integrates with price-time priority without re-sorting or corrupting the resting order queues.
+
+3. **Time-in-Force Interactions**:
+   - **Limit GTC Orders**: Matches against other participants; upon encountering same user, emits fills for matched portion, cancels the remaining quantity (`EventOrderCancelled`), and does not rest.
+   - **IOC & Market Orders**: Matches against prior participants; upon hitting self-order, cancels the remainder (`EventOrderCancelled`).
+   - **FOK Orders**: Evaluated atomically during pre-check (`can_fully_fill`). If the full order quantity cannot be satisfied without trading against the user's own resting orders, the FOK pre-check returns `false` and the order is killed with 0 fills and zero state mutations.
+   - **Order Modifications (`modify`)**: If a price-crossing modification moves an order into the opposite side of the book where the user has resting orders, the modified order executes against other users up to the self-trade point, and its remainder is cancelled (`EventOrderCancelled`), leaving the resting maker intact.
+   - **Anonymous Orders (`UserId == INVALID_USER_ID (0)`)**: Orders submitted with unassigned user ID (`0`) represent anonymous or un-authenticated orders and do not trigger STP against each other.
+
+4. **Event Guarantees**:
+   - For an aggressive order triggering STP after partial fills:
+     `OrderAccepted` → `[Fill...]` (for trades with distinct users) → `OrderCancelled` (for the unexecuted remainder).
+   - For an aggressive order encountering a self-order immediately (0 fills):
+     `OrderAccepted` → `OrderCancelled` (for the full quantity).
 
 ---
 

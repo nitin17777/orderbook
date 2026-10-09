@@ -68,7 +68,8 @@ std::vector<Fill> FastOrderBook::match(Order& incoming) {
 
     if (incoming.side == Side::Buy) {
         // Match against asks — walk up from best ask
-        while (incoming.open_quantity() > 0 &&
+        while (incoming.status != OrderStatus::Cancelled &&
+               incoming.open_quantity() > 0 &&
                best_ask_price_ <= MAX_PRICE) {
 
             Price level_price = best_ask_price_;
@@ -78,7 +79,8 @@ std::vector<Fill> FastOrderBook::match(Order& incoming) {
                 level_price > incoming.price) break;
 
             // Drain this level
-            while (incoming.open_quantity() > 0 &&
+            while (incoming.status != OrderStatus::Cancelled &&
+                   incoming.open_quantity() > 0 &&
                    !asks_.empty(level_price)) {
 
                 OrderId maker_id = asks_.front(level_price);
@@ -88,6 +90,12 @@ std::vector<Fill> FastOrderBook::match(Order& incoming) {
                 if (!maker || maker->is_terminal()) {
                     asks_.pop_front(level_price);
                     continue;
+                }
+
+                // Self-Trade Prevention (STP): Cancel Newest / Cancel Taker
+                if (incoming.user_id != INVALID_USER_ID && maker->user_id == incoming.user_id) {
+                    incoming.status = OrderStatus::Cancelled;
+                    break;
                 }
 
                 Quantity trade_qty = std::min(incoming.open_quantity(),
@@ -122,7 +130,8 @@ std::vector<Fill> FastOrderBook::match(Order& incoming) {
         }
     } else {
         // Match against bids — walk down from best bid
-        while (incoming.open_quantity() > 0 &&
+        while (incoming.status != OrderStatus::Cancelled &&
+               incoming.open_quantity() > 0 &&
                best_bid_price_ >= MIN_PRICE) {
 
             Price level_price = best_bid_price_;
@@ -130,7 +139,8 @@ std::vector<Fill> FastOrderBook::match(Order& incoming) {
             if (incoming.type == OrderType::Limit &&
                 level_price < incoming.price) break;
 
-            while (incoming.open_quantity() > 0 &&
+            while (incoming.status != OrderStatus::Cancelled &&
+                   incoming.open_quantity() > 0 &&
                    !bids_.empty(level_price)) {
 
                 OrderId maker_id = bids_.front(level_price);
@@ -139,6 +149,12 @@ std::vector<Fill> FastOrderBook::match(Order& incoming) {
                 if (!maker || maker->is_terminal()) {
                     bids_.pop_front(level_price);
                     continue;
+                }
+
+                // Self-Trade Prevention (STP): Cancel Newest / Cancel Taker
+                if (incoming.user_id != INVALID_USER_ID && maker->user_id == incoming.user_id) {
+                    incoming.status = OrderStatus::Cancelled;
+                    break;
                 }
 
                 Quantity trade_qty = std::min(incoming.open_quantity(),
@@ -189,6 +205,9 @@ bool FastOrderBook::can_fully_fill(const Order& incoming) const {
                 if (!maker || maker->is_terminal()) {
                     continue; // Lazy deletion tombstone
                 }
+                if (incoming.user_id != INVALID_USER_ID && maker->user_id == incoming.user_id) {
+                    return false;
+                }
                 Quantity avail = maker->open_quantity();
                 if (avail >= needed) return true;
                 needed -= avail;
@@ -206,6 +225,9 @@ bool FastOrderBook::can_fully_fill(const Order& incoming) const {
                 const Order* maker = pool_.get(maker_id);
                 if (!maker || maker->is_terminal()) {
                     continue; // Lazy deletion tombstone
+                }
+                if (incoming.user_id != INVALID_USER_ID && maker->user_id == incoming.user_id) {
+                    return false;
                 }
                 Quantity avail = maker->open_quantity();
                 if (avail >= needed) return true;
@@ -235,8 +257,8 @@ std::vector<Fill> FastOrderBook::add(Order order) {
         return fills;
     }
 
-    // Limit GTC order: rest remainder in book if not fully filled
-    if (order.open_quantity() > 0)
+    // Limit GTC order: rest remainder in book if not fully filled and not cancelled by STP
+    if (order.status != OrderStatus::Cancelled && order.open_quantity() > 0)
         rest(order);
 
     return fills;

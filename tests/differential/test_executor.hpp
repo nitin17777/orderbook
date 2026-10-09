@@ -12,6 +12,7 @@ CommandResult execute_command(BookType& book, const TestCommand& cmd) {
     case CommandKind::LimitOrder: {
         Order o{};
         o.id        = cmd.id;
+        o.user_id   = cmd.user_id;
         o.side      = cmd.side;
         o.type      = OrderType::Limit;
         o.status    = OrderStatus::Accepted;
@@ -26,6 +27,7 @@ CommandResult execute_command(BookType& book, const TestCommand& cmd) {
     case CommandKind::MarketOrder: {
         Order o{};
         o.id        = cmd.id;
+        o.user_id   = cmd.user_id;
         o.side      = cmd.side;
         o.type      = OrderType::Market;
         o.status    = OrderStatus::Accepted;

@@ -686,4 +686,253 @@ TEST_CASE("Engine: modify — replay preserves fills from crossing modify", "[en
     }
 }
 
+// ── Task 5.3: Self-Trade Prevention (STP) ─────────────────────────────────────
+
+TEST_CASE("Engine: STP — same user limit order cancels taker and preserves maker", "[engine][stp]") {
+    TempLog tmp("test_stp_basic.log");
+    Engine engine(tmp.path);
+
+    UserId user_a = 100;
+    // User A places a resting ask: 10 @ 100
+    VectorSink sink1;
+    auto r1 = engine.add(make_limit(1, Side::Sell, 100, 10, user_a, 1), sink1);
+    REQUIRE(r1.accepted);
+    REQUIRE(r1.fills.empty());
+    REQUIRE(engine.book().order_count() == 1);
+    REQUIRE(engine.book().best_ask() == 100);
+
+    // User A submits crossing buy: 10 @ 100
+    VectorSink sink2;
+    auto r2 = engine.add(make_limit(2, Side::Buy, 100, 10, user_a, 2), sink2);
+    REQUIRE(r2.accepted);
+    REQUIRE(r2.fills.empty());  // NO fill allowed between same user
+
+    // Maker order 1 must be preserved intact in the book
+    REQUIRE(engine.book().order_count() == 1);
+    REQUIRE(engine.book().find(1) != nullptr);
+    REQUIRE(engine.book().find(1)->open_quantity() == 10);
+    REQUIRE(engine.book().find(2) == nullptr); // Taker cancelled, not resting
+
+    // Event sequence for taker: OrderAccepted, OrderCancelled (remaining=10)
+    REQUIRE(sink2.events.size() == 2);
+    REQUIRE(sink2.events[0].tag() == EventTag::OrderAccepted);
+    REQUIRE(sink2.events[0].accepted.order_id == 2);
+    REQUIRE(sink2.events[1].tag() == EventTag::OrderCancelled);
+    REQUIRE(sink2.events[1].cancelled.order_id == 2);
+    REQUIRE(sink2.events[1].cancelled.remaining_qty == 10);
+}
+
+TEST_CASE("Engine: STP — different users match normally", "[engine][stp]") {
+    TempLog tmp("test_stp_diff_users.log");
+    Engine engine(tmp.path);
+
+    UserId user_a = 100;
+    UserId user_b = 200;
+
+    engine.add(make_limit(1, Side::Sell, 100, 10, user_a, 1));
+
+    VectorSink sink;
+    auto r2 = engine.add(make_limit(2, Side::Buy, 100, 10, user_b, 1), sink);
+    REQUIRE(r2.accepted);
+    REQUIRE(r2.fills.size() == 1);
+    REQUIRE(r2.fills[0].maker_id == 1);
+    REQUIRE(r2.fills[0].taker_id == 2);
+    REQUIRE(r2.fills[0].price == 100);
+    REQUIRE(r2.fills[0].quantity == 10);
+
+    REQUIRE(engine.book().order_count() == 0);
+
+    // Event sequence: OrderAccepted, Fill
+    REQUIRE(sink.events.size() == 2);
+    REQUIRE(sink.events[0].tag() == EventTag::OrderAccepted);
+    REQUIRE(sink.events[1].tag() == EventTag::Fill);
+}
+
+TEST_CASE("Engine: STP — anonymous orders (INVALID_USER_ID) match without STP", "[engine][stp]") {
+    TempLog tmp("test_stp_anonymous.log");
+    Engine engine(tmp.path);
+
+    // Unassigned user id (0)
+    engine.add(make_limit(1, Side::Sell, 100, 10, INVALID_USER_ID));
+    auto r2 = engine.add(make_limit(2, Side::Buy, 100, 10, INVALID_USER_ID));
+
+    REQUIRE(r2.accepted);
+    REQUIRE(r2.fills.size() == 1);
+    REQUIRE(r2.fills[0].quantity == 10);
+    REQUIRE(engine.book().order_count() == 0);
+}
+
+TEST_CASE("Engine: STP — multi-level sweep fills other users first then cancels at own order", "[engine][stp]") {
+    TempLog tmp("test_stp_sweep.log");
+    Engine engine(tmp.path);
+
+    UserId user_a = 1;
+    UserId user_b = 2;
+    UserId user_c = 3;
+
+    // Resting asks:
+    // Level 100: User A (10)
+    // Level 101: User B (10)
+    // Level 102: User C (10)
+    engine.add(make_limit(1, Side::Sell, 100, 10, user_a, 101));
+    engine.add(make_limit(2, Side::Sell, 101, 10, user_b, 102));
+    engine.add(make_limit(3, Side::Sell, 102, 10, user_c, 103));
+
+    // User B sends aggressive Buy: 25 @ 102
+    // - Should match 10 @ 100 against User A
+    // - Hits own resting order at 101 -> STP triggers!
+    // - Halts matching: remaining 15 of incoming order cancelled
+    // - User B's order 2 (10 @ 101) remains resting
+    // - User C's order 3 (10 @ 102) remains resting
+    VectorSink sink;
+    auto res = engine.add(make_limit(4, Side::Buy, 102, 25, user_b, 104), sink);
+    REQUIRE(res.accepted);
+    REQUIRE(res.fills.size() == 1);
+    REQUIRE(res.fills[0].maker_id == 1);
+    REQUIRE(res.fills[0].price == 100);
+    REQUIRE(res.fills[0].quantity == 10);
+
+    // Book state: order 1 is gone, orders 2 and 3 remain
+    REQUIRE(engine.book().order_count() == 2);
+    REQUIRE(engine.book().find(2) != nullptr);
+    REQUIRE(engine.book().find(2)->open_quantity() == 10);
+    REQUIRE(engine.book().find(3) != nullptr);
+    REQUIRE(engine.book().find(3)->open_quantity() == 10);
+    REQUIRE(engine.book().best_ask() == 101);
+
+    // Event sequence: OrderAccepted -> Fill -> OrderCancelled (remaining=15)
+    REQUIRE(sink.events.size() == 3);
+    REQUIRE(sink.events[0].tag() == EventTag::OrderAccepted);
+    REQUIRE(sink.events[1].tag() == EventTag::Fill);
+    REQUIRE(sink.events[1].fill.maker_id == 1);
+    REQUIRE(sink.events[2].tag() == EventTag::OrderCancelled);
+    REQUIRE(sink.events[2].cancelled.order_id == 4);
+    REQUIRE(sink.events[2].cancelled.remaining_qty == 15);
+}
+
+TEST_CASE("Engine: STP — FOK order atomically cancels with zero fills if fill requires self-trade", "[engine][stp]") {
+    TempLog tmp("test_stp_fok.log");
+    Engine engine(tmp.path);
+
+    UserId user_a = 1;
+    UserId user_b = 2;
+
+    // User A has 5 @ 100, User B has 5 @ 100
+    engine.add(make_limit(1, Side::Sell, 100, 5, user_a, 1));
+    engine.add(make_limit(2, Side::Sell, 100, 5, user_b, 2));
+
+    // User B sends FOK Buy 10 @ 100.
+    // Full 10 cannot be filled without trading with User B's own order 2.
+    // FOK must kill entire order with 0 fills and leave book unchanged.
+    Order fok_order{};
+    fok_order.id              = 3;
+    fok_order.user_id         = user_b;
+    fok_order.client_order_id = 3;
+    fok_order.side            = Side::Buy;
+    fok_order.type            = OrderType::Limit;
+    fok_order.status          = OrderStatus::Accepted;
+    fok_order.tif             = TimeInForce::FOK;
+    fok_order.price           = 100;
+    fok_order.quantity        = 10;
+    fok_order.filled          = 0;
+
+    VectorSink sink;
+    auto res = engine.add(fok_order, sink);
+    REQUIRE(res.accepted);
+    REQUIRE(res.fills.empty());
+
+    // Both resting orders still in book
+    REQUIRE(engine.book().order_count() == 2);
+    REQUIRE(engine.book().find(1)->open_quantity() == 5);
+    REQUIRE(engine.book().find(2)->open_quantity() == 5);
+
+    // Event sequence: OrderAccepted -> OrderCancelled (qty=10)
+    REQUIRE(sink.events.size() == 2);
+    REQUIRE(sink.events[0].tag() == EventTag::OrderAccepted);
+    REQUIRE(sink.events[1].tag() == EventTag::OrderCancelled);
+    REQUIRE(sink.events[1].cancelled.remaining_qty == 10);
+}
+
+TEST_CASE("Engine: STP — Market order cancelled against own resting quote", "[engine][stp]") {
+    TempLog tmp("test_stp_market.log");
+    Engine engine(tmp.path);
+
+    UserId user_a = 42;
+    engine.add(make_limit(1, Side::Sell, 100, 10, user_a, 1));
+
+    VectorSink sink;
+    auto res = engine.add(make_market(2, Side::Buy, 10, user_a, 2), sink);
+    REQUIRE(res.accepted);
+    REQUIRE(res.fills.empty());
+
+    REQUIRE(engine.book().order_count() == 1);
+    REQUIRE(engine.book().find(1)->open_quantity() == 10);
+
+    REQUIRE(sink.events.size() == 2);
+    REQUIRE(sink.events[0].tag() == EventTag::OrderAccepted);
+    REQUIRE(sink.events[1].tag() == EventTag::OrderCancelled);
+    REQUIRE(sink.events[1].cancelled.remaining_qty == 10);
+}
+
+TEST_CASE("Engine: STP — Modify crossing into own resting order triggers STP", "[engine][stp]") {
+    TempLog tmp("test_stp_modify.log");
+    Engine engine(tmp.path);
+
+    UserId user_a = 55;
+    engine.add(make_limit(1, Side::Buy,  100, 10, user_a, 1));
+    engine.add(make_limit(2, Side::Sell, 105, 10, user_a, 2));
+
+    // User A modifies Ask from 105 to 100 (crosses book into own resting Bid)
+    VectorSink sink;
+    auto res = engine.modify(2, 100, 10, user_a, sink);
+    REQUIRE(res.accepted);
+    REQUIRE(res.fills.empty()); // No self-trade
+
+    // Resting Bid 1 still in book; modified order 2 cancelled by STP
+    REQUIRE(engine.book().order_count() == 1);
+    REQUIRE(engine.book().find(1) != nullptr);
+    REQUIRE(engine.book().find(2) == nullptr);
+
+    // Event sequence: OrderModified -> OrderCancelled (qty=10)
+    REQUIRE(sink.events.size() == 2);
+    REQUIRE(sink.events[0].tag() == EventTag::OrderModified);
+    REQUIRE(sink.events[1].tag() == EventTag::OrderCancelled);
+    REQUIRE(sink.events[1].cancelled.remaining_qty == 10);
+}
+
+TEST_CASE("Engine: STP — Replay produces identical state and zero self-trade fills", "[engine][stp][replay]") {
+    TempLog tmp("test_stp_replay.log");
+
+    std::vector<Fill> original_fills;
+    {
+        Engine engine(tmp.path);
+        UserId u1 = 1, u2 = 2;
+
+        engine.add(make_limit(1, Side::Sell, 100, 10, u1));
+        engine.add(make_limit(2, Side::Sell, 101, 10, u2));
+
+        // Self-trade attempt on u1: no fill
+        auto r3 = engine.add(make_limit(3, Side::Buy, 100, 10, u1));
+        original_fills.insert(original_fills.end(), r3.fills.begin(), r3.fills.end());
+
+        // Cross with u2: fills against u1 (10@100), stops at u2 (10@101)
+        auto r4 = engine.add(make_limit(4, Side::Buy, 101, 20, u2));
+        original_fills.insert(original_fills.end(), r4.fills.begin(), r4.fills.end());
+
+        engine.flush();
+    }
+
+    auto result = Engine::replay(tmp.path);
+    REQUIRE(result.fills.size() == original_fills.size());
+    for (size_t i = 0; i < original_fills.size(); ++i) {
+        REQUIRE(result.fills[i].maker_id == original_fills[i].maker_id);
+        REQUIRE(result.fills[i].taker_id == original_fills[i].taker_id);
+        REQUIRE(result.fills[i].price    == original_fills[i].price);
+        REQUIRE(result.fills[i].quantity == original_fills[i].quantity);
+    }
+    // Only order 2 remains
+    REQUIRE(result.book.order_count() == 1);
+    REQUIRE(result.book.find(2) != nullptr);
+}
+
 

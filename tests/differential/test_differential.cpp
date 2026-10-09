@@ -209,6 +209,53 @@ TEST_CASE("Differential: Scenario 17 - Modify followed by cancel", "[differentia
     REQUIRE(result.passed);
 }
 
+// ── Task 5.3: Self-Trade Prevention (STP) Differential Scenarios ──────────────
+
+TEST_CASE("Differential: Scenario 18 - STP direct crossing between same user", "[differential][stp]") {
+    UserId user_a = 10;
+    std::vector<TestCommand> cmds = {
+        TestCommand::limit(1, Side::Sell, 100, 10, 1, TimeInForce::GTC, user_a),
+        TestCommand::limit(2, Side::Buy,  100, 10, 2, TimeInForce::GTC, user_a)
+    };
+    auto result = run_differential_sequence(cmds);
+    REQUIRE(result.passed);
+}
+
+TEST_CASE("Differential: Scenario 19 - STP multi-level sweep across mixed users", "[differential][stp]") {
+    UserId user_a = 1, user_b = 2, user_c = 3;
+    std::vector<TestCommand> cmds = {
+        TestCommand::limit(1, Side::Sell, 100, 10, 1, TimeInForce::GTC, user_a),
+        TestCommand::limit(2, Side::Sell, 101, 10, 2, TimeInForce::GTC, user_b),
+        TestCommand::limit(3, Side::Sell, 102, 10, 3, TimeInForce::GTC, user_c),
+        TestCommand::limit(4, Side::Buy,  102, 25, 4, TimeInForce::GTC, user_b)
+    };
+    auto result = run_differential_sequence(cmds);
+    REQUIRE(result.passed);
+}
+
+TEST_CASE("Differential: Scenario 20 - STP FOK atomic evaluation", "[differential][stp]") {
+    UserId user_a = 1, user_b = 2;
+    std::vector<TestCommand> cmds = {
+        TestCommand::limit(1, Side::Sell, 100, 5, 1, TimeInForce::GTC, user_a),
+        TestCommand::limit(2, Side::Sell, 100, 5, 2, TimeInForce::GTC, user_b),
+        TestCommand::fok(3, Side::Buy, 100, 10, 3, user_b), // Needs 10, but 5 is own -> FOK kills
+        TestCommand::fok(4, Side::Buy, 100, 5, 4, user_b)   // Needs 5, fills user_a (5) -> succeeds
+    };
+    auto result = run_differential_sequence(cmds);
+    REQUIRE(result.passed);
+}
+
+TEST_CASE("Differential: Scenario 21 - STP Modify crossing into own resting order", "[differential][stp]") {
+    UserId user_a = 99;
+    std::vector<TestCommand> cmds = {
+        TestCommand::limit(1, Side::Buy,  100, 10, 1, TimeInForce::GTC, user_a),
+        TestCommand::limit(2, Side::Sell, 105, 10, 2, TimeInForce::GTC, user_a),
+        TestCommand::modify(2, 100, 10, 3, user_a)
+    };
+    auto result = run_differential_sequence(cmds);
+    REQUIRE(result.passed);
+}
+
 // ── 2. Randomized Differential & Property Fuzzing ─────────────────────────────
 
 TEST_CASE("Differential: Multi-seed randomized differential fuzzing (with modify)", "[differential][fuzz]") {

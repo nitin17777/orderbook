@@ -61,7 +61,7 @@ std::vector<Fill> OrderBook::match(Order& incoming) {
     std::vector<Fill> fills;
 
     auto try_match = [&](auto& levels) {
-        while (incoming.open_quantity() > 0 && !levels.empty()) {
+        while (incoming.status != OrderStatus::Cancelled && incoming.open_quantity() > 0 && !levels.empty()) {
             auto level_it = levels.begin();
             Price level_price = level_it->first;
 
@@ -72,8 +72,17 @@ std::vector<Fill> OrderBook::match(Order& incoming) {
 
             auto& queue = level_it->second;
 
-            while (incoming.open_quantity() > 0 && !queue.empty()) {
+            while (incoming.status != OrderStatus::Cancelled && incoming.open_quantity() > 0 && !queue.empty()) {
                 Order& maker = queue.front();
+
+                // Self-Trade Prevention (STP): Cancel Newest / Cancel Taker
+                // When taker encounters its own resting maker, cancel the remaining taker quantity
+                // and preserve the resting maker intact.
+                if (incoming.user_id != INVALID_USER_ID && maker.user_id == incoming.user_id) {
+                    incoming.status = OrderStatus::Cancelled;
+                    break;
+                }
+
                 Quantity trade_qty = std::min(incoming.open_quantity(), maker.open_quantity());
 
                 fills.push_back({ incoming.id, maker.id, level_price, trade_qty });
@@ -117,6 +126,10 @@ bool OrderBook::can_fully_fill(const Order& incoming) const {
         for (const auto& [price, queue] : asks_) {
             if (incoming.type == OrderType::Limit && price > incoming.price) break;
             for (const auto& maker : queue) {
+                // STP: Cannot match against own orders
+                if (incoming.user_id != INVALID_USER_ID && maker.user_id == incoming.user_id) {
+                    return false;
+                }
                 Quantity avail = maker.open_quantity();
                 if (avail >= needed) return true;
                 needed -= avail;
@@ -126,6 +139,10 @@ bool OrderBook::can_fully_fill(const Order& incoming) const {
         for (const auto& [price, queue] : bids_) {
             if (incoming.type == OrderType::Limit && price < incoming.price) break;
             for (const auto& maker : queue) {
+                // STP: Cannot match against own orders
+                if (incoming.user_id != INVALID_USER_ID && maker.user_id == incoming.user_id) {
+                    return false;
+                }
                 Quantity avail = maker.open_quantity();
                 if (avail >= needed) return true;
                 needed -= avail;
@@ -151,7 +168,8 @@ std::vector<Fill> OrderBook::add(Order order) {
         return fills;
     }
 
-    if (order.open_quantity() > 0)
+    // Limit GTC order: rest remainder only if not cancelled by STP
+    if (order.status != OrderStatus::Cancelled && order.open_quantity() > 0)
         rest(order);
 
     return fills;

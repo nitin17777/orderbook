@@ -151,6 +151,16 @@ public:
                     client_to_order_id_[key] = order.id;
                     order_to_client_key_[order.id] = key;
                 }
+            } else {
+                // If GTC order did not rest in book (e.g. cancelled by STP), emit cancel event for remainder
+                Quantity remaining = order.quantity - total_filled;
+                if (remaining > 0) {
+                    Event ev{};
+                    ev.cancelled.header        = make_header(EventTag::OrderCancelled, now);
+                    ev.cancelled.order_id      = order.id;
+                    ev.cancelled.remaining_qty = remaining;
+                    sink(ev);
+                }
             }
         }
 
@@ -289,8 +299,12 @@ public:
         // 3. Execute modification in book
         auto fills = book_.modify(id, new_price, new_qty, now);
 
+        Quantity total_filled = 0;
+
         // 4. Emit Fill events if matched
         for (const auto& f : fills) {
+            total_filled += f.quantity;
+
             Event ev{};
             ev.fill.header   = make_header(EventTag::Fill, now);
             ev.fill.taker_id = f.taker_id;
@@ -303,9 +317,17 @@ public:
                 cleanup_client_mapping(f.maker_id);
         }
 
-        // 5. Clean up client mapping if modified order was fully filled
+        // 5. Clean up client mapping if modified order was fully filled or cancelled by STP
         if (book_.find(id) == nullptr) {
             cleanup_client_mapping(id);
+            Quantity remaining = (new_qty > total_filled) ? (new_qty - total_filled) : 0;
+            if (remaining > 0) {
+                Event ev{};
+                ev.cancelled.header        = make_header(EventTag::OrderCancelled, now);
+                ev.cancelled.order_id      = id;
+                ev.cancelled.remaining_qty = remaining;
+                sink(ev);
+            }
         }
 
         return ModifyResult{true, RejectReason::None, std::move(fills)};
